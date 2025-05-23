@@ -34,39 +34,6 @@ class NodeBase(object):
         from .utils import _ConnPortOut
         return _ConnPortOut(self.output_slots)
 
-    def execute(self, context: MutableMapping[OutputSlot, Any]) -> None:
-        input_values = {}
-
-        for input_slot in self.input_slots.values():
-            name = input_slot.name
-            src_slot = input_slot.source
-
-            if src_slot is None:
-                if input_slot.has_default():
-                    input_values[name] = input_slot.default
-                else:
-                    raise RuntimeError(f"The '{name}' input of node "
-                                       f"'{self}' is not connected "
-                                       "and not having a default value.")
-            elif src_slot in context:
-                input_values[name] = context[src_slot]
-            else:
-                raise RuntimeError()
-
-        results = self.run(**input_values)
-
-        if not isinstance(results, tuple):
-            results = (results,)
-
-        if len(results) != len(self.output_slots):
-            raise RuntimeError(
-                f"Number of returns ({len(results)}) mismatch "
-                f"the number of output slots ({len(self.output_slots)})."
-            )
-
-        for output_slot, result in zip(self.output_slots.values(), results):
-            context[output_slot] = result
-
 
 class Node(NodeBase):
     _input_slots : Dict[str, InputSlot]
