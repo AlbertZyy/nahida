@@ -1,10 +1,10 @@
-from typing import Set, Dict, List, Iterable, Any, Callable
+from typing import Set, Dict, List, Iterable, Mapping, Any, Callable
 from collections import deque
 import time
 
-from ._types import (
-    Node, InputSlot, OutputSlot,
-    NodeExceptionData, NodeIOError,
+from .._types import (
+    SlotStatus, InputSlot, OutputSlot,
+    Node, NodeExceptionData, NodeIOError,
     GraphStatus, GraphStatusError
 )
 
@@ -25,16 +25,18 @@ class Graph():
         self.error_listeners = []
         self.status_listeners = []
 
-    def _get_inputs(self, slots: Iterable[InputSlot]) -> Dict[str, Any]:
+    def _get_inputs(self, slots: Mapping[str, InputSlot]) -> Dict[str, Any]:
         input_data = {}
 
-        for input_slot in slots:
-            name = input_slot.name
-            src_slot = input_slot.source
+        for name, input_slot in slots.items():
+            slot_status = input_slot.get_status()
+            if slot_status == SlotStatus.DISABLED:
+                continue
+            src_slot = input_slot.get_source()
 
-            if src_slot is None:
-                if input_slot.has_default():
-                    input_data[name] = input_slot.default
+            if (src_slot is None) or (slot_status == SlotStatus.BLOCKED):
+                if input_slot.has_value():
+                    input_data[name] = input_slot.get_value()
                 else:
                     raise NodeIOError(f"The '{name}' input of node "
                                       f"'{self}' is not connected "
@@ -46,17 +48,22 @@ class Graph():
 
         return input_data
 
-    def _put_outputs(self, slots: Iterable[OutputSlot], results: Any) -> None:
+    def _put_outputs(self, slots: Mapping[str, OutputSlot], results: Any) -> None:
         if not isinstance(results, tuple):
             results = (results,)
 
         try:
-            for output_slot, result in zip(slots, results, strict=True):
-                self.context[output_slot] = result
+            enabled_slots = [
+                slot for slot in slots.values()
+                if slot.get_status() != SlotStatus.DISABLED
+            ]
+            for output_slot, result in zip(enabled_slots, results, strict=True):
+                if output_slot.get_status() != SlotStatus.BLOCKED:
+                    self.context[output_slot] = result
         except ValueError:
             raise NodeIOError(
                 f"Number of returns ({len(results)}) mismatch "
-                f"the number of output slots."
+                f"the number of enabled output slots."
             )
 
     @staticmethod
@@ -86,7 +93,7 @@ class Graph():
         self._set_status(GraphStatus.RUN)
 
         for node in self._topological_sort(self.output_nodes.values()):
-            input_data = self._get_inputs(node.input_slots.values())
+            input_data = self._get_inputs(node.input_slots)
             try:
                 results = node.run(**input_data)
             except Exception as exception:
@@ -95,7 +102,7 @@ class Graph():
                 self._send_exception(error_info)
                 break
 
-            self._put_outputs(node.output_slots.values(), results)
+            self._put_outputs(node.output_slots, results)
         else:
             self._set_status(GraphStatus.STOP)
 
@@ -123,9 +130,9 @@ class Graph():
             if current not in adj_list:
                 adj_list[current] = []
 
-            for in_slot in current._input_slots.values():
-                if in_slot.source is not None:
-                    source_node = in_slot.source.node
+            for in_slot in current.input_slots.values():
+                if in_slot.is_connected():
+                    source_node = in_slot.get_source().get_source()
                     stack.append(source_node)
                     in_degree[current] += 1
 

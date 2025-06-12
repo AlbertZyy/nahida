@@ -1,9 +1,10 @@
 from typing import (
-    Tuple, Dict,
-    Mapping, MutableMapping,
-    Any,
-    TypeVar, overload
+    Tuple, Dict, Mapping, Any,
+    overload
 )
+from collections import OrderedDict
+
+from .._types import NodeTopologyError
 from .connection import InputSlot, OutputSlot
 
 __all__ = [
@@ -12,10 +13,8 @@ __all__ = [
     "Sequential"
 ]
 
-_Self = TypeVar("_Self")
 
-
-class NodeBase(object):
+class AbstractNode(object):
     @property
     def input_slots(self) -> Mapping[str, InputSlot]:
         raise NotImplementedError
@@ -23,21 +22,21 @@ class NodeBase(object):
     @property
     def output_slots(self) -> Mapping[str, OutputSlot]:
         raise NotImplementedError
-
+    
     @property
     def IN(self):
-        from .utils import _ConnPortIn
+        from ..utils import _ConnPortIn
         return _ConnPortIn(self.input_slots)
-
+    
     @property
     def OUT(self):
-        from .utils import _ConnPortOut
+        from ..utils import _ConnPortOut
         return _ConnPortOut(self.output_slots)
 
 
-class Node(NodeBase):
-    _input_slots : Dict[str, InputSlot]
-    _output_slots : Dict[str, OutputSlot]
+class Node(AbstractNode):
+    _input_slots : OrderedDict[str, InputSlot]
+    _output_slots : OrderedDict[str, OutputSlot]
 
     def __init__(
         self,
@@ -48,39 +47,74 @@ class Node(NodeBase):
     ):
         r"""Initialize a compute node."""
         super().__init__()
-        self._input_slots = {}
-        self._output_slots = {}
         self._target = target
+        self._input_slots = OrderedDict()
+        self._output_slots = OrderedDict()
+        self._connection_hooks = OrderedDict()
+        self._status_hooks = OrderedDict()
 
         if target:
             for in_arg in inputs:
                 if in_arg in defaults:
-                    self.add_input(in_arg, default=defaults[in_arg])
+                    self.register_input(in_arg, default=defaults[in_arg])
                 else:
-                    self.add_input(in_arg)
+                    self.register_input(in_arg)
 
             for out_arg in outputs:
-                self.add_output(out_arg)
-
-    def __hash__(self):
-        return id(self)
+                self.register_output(out_arg)
 
     @overload
-    def add_input(self: _Self, name: str) -> _Self: ...
+    def register_input(self, name: str) -> None: ...
     @overload
-    def add_input(self: _Self, name: str, *, default: Any) -> _Self: ...
-    def add_input(self, name: str, **kwargs):
-        self._input_slots[name] = InputSlot(name, **kwargs)
-        return self
+    def register_input(self, name: str, *, default: Any) -> None: ...
+    def register_input(self, name: str, **kwargs):
+        """Add an input slot to the node."""
+        if "_input_slots" not in self.__dict__:
+            raise AttributeError(
+                "cannot assign inputs before Node.__init__() call"
+            )
+        elif not isinstance(name, str):
+            raise TypeError(
+                f"input name should be a string, but got {name.__class__.__name__}"
+            )
+        elif "." in name:
+            raise KeyError('input name can\'t contain "."')
+        elif name == "":
+            raise KeyError('input name can\'t be empty string ""')
+        elif hasattr(self, name) and name not in self._input_slots:
+            raise KeyError(f"attribute '{name}' already exists")
+        else:
+            self._input_slots[name] = InputSlot(**kwargs)
 
-    def add_output(self, name: str):
-        self._output_slots[name] = OutputSlot(name, self)
-        return self
+    def register_output(self, name: str) -> None:
+        """Add an output slot to the node."""
+        if "_output_slots" not in self.__dict__:
+            raise AttributeError(
+                "cannot assign outputs before Node.__init__() call"
+            )
+        elif not isinstance(name, str):
+            raise TypeError(
+                f"output name should be a string, but got {name.__class__.__name__}"
+            )
+        elif "." in name:
+            raise KeyError('output name can\'t contain "."')
+        elif name == "":
+            raise KeyError('output name can\'t be empty string ""')
+        elif hasattr(self, name) and name not in self._output_slots:
+            raise KeyError(f"attribute '{name}' already exists")
+        else:
+            self._output_slots[name] = OutputSlot(self)
 
     def get_input(self, name: str):
+        """Return the input slot given by `name`. Raises NodeTopologyError if not exists."""
+        if name not in self.input_slots:
+            raise NodeTopologyError(f"no input named {name}")
         return self._input_slots[name]
 
     def get_output(self, name: str):
+        """Return the output slot given by `name`. Raises NodeTopologyError if not exists."""
+        if name not in self.output_slots:
+            raise NodeTopologyError(f"no output named {name}")
         return self._output_slots[name]
 
     @property
@@ -121,7 +155,7 @@ class Const(Node):
     def __init__(self, value: Any):
         super().__init__()
         self._value = value
-        self.add_output("value")
+        self.register_output("value")
 
     def __repr__(self):
         return f"Const({self._value})"
@@ -145,14 +179,14 @@ class Sequential(Container):
         super().__init__()
         self.nodes = tuple(args)
 
-        for name, inslots in args[0]._input_slots.items():
+        for name, inslots in args[0].input_slots.items():
             if inslots.has_default():
-                self.add_input(name, default=inslots.default)
+                self.register_input(name, default=inslots.get_value())
             else:
-                self.add_input(name)
+                self.register_input(name)
 
         for name in args[-1].output_slots:
-            self.add_output(name)
+            self.register_output(name)
 
     def __repr__(self):
         return " >> ".join([repr(n) for n in self.nodes])
@@ -170,15 +204,15 @@ class OutputNode(Node):
     def __init__(self):
         super().__init__()
         self._value = None
-        self.add_input("value", default=None)
-        self.add_output("out")
+        self.register_input("val", default=None)
+        self.register_output("out")
 
     def __repr__(self):
         return "OutputNode"
 
-    def run(self, value):
-        self._value = value
-        return value
+    def run(self, val):
+        self._value = val
+        return val
 
     @property
     def value(self):

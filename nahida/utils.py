@@ -1,6 +1,6 @@
 from typing import Dict
 
-from .node import InputSlot, OutputSlot
+from .core.connection import InputSlot, OutputSlot
 
 
 class _ConnPort():
