@@ -21,27 +21,7 @@ __all__ = [
 ]
 
 
-class AbstractNode(object):
-    @property
-    def input_slots(self) -> Mapping[str, InputSlot]:
-        raise NotImplementedError
-
-    @property
-    def output_slots(self) -> Mapping[str, OutputSlot]:
-        raise NotImplementedError
-
-    @property
-    def IN(self):
-        from ..utils import _ConnPortIn
-        return _ConnPortIn(self.input_slots, self)
-
-    @property
-    def OUT(self):
-        from ..utils import _ConnPortOut
-        return _ConnPortOut(self.output_slots, self)
-
-
-class Node(AbstractNode):
+class Node():
     _input_slots : OrderedDict[str, InputSlot]
     _output_slots : OrderedDict[str, OutputSlot]
 
@@ -50,11 +30,13 @@ class Node(AbstractNode):
         target=None,
         inputs: Tuple[str, ...] = (),
         defaults: Dict[str, Any] = {},
-        outputs: Tuple[str, ...] = ()
+        outputs: Tuple[str, ...] = (),
+        variable: bool = False
     ):
         r"""Initialize a compute node."""
         super().__init__()
         self._target = target
+        self._variable = variable
         self._input_slots = OrderedDict()
         self._output_slots = OrderedDict()
         self._connection_hooks = OrderedDict()
@@ -123,16 +105,16 @@ class Node(AbstractNode):
 
     def get_input(self, name: str):
         """Return the input slot given by `name`. Raises NodeTopologyError if not exists."""
-        if name not in self.input_slots:
+        if name not in self._input_slots:
             raise NodeTopologyError(f"no input named {name}")
         return self._input_slots[name]
 
     def get_output(self, name: str):
         """Return the output slot given by `name`. Raises NodeTopologyError if not exists."""
-        if name not in self.output_slots:
+        if name not in self._output_slots:
             raise NodeTopologyError(f"no output named {name}")
         return self._output_slots[name]
-    
+
     def dump_key(self, slot: str):
         return (self, slot)
 
@@ -143,6 +125,10 @@ class Node(AbstractNode):
     @property
     def output_slots(self):
         return self._output_slots
+
+    @property
+    def is_variable(self):
+        return self._variable
 
     def run(self, *args, **kwargs):
         if self._target:
@@ -226,6 +212,16 @@ class Node(AbstractNode):
                 data_box.has_data = True
             # Release the data box
             output_slot.databox = None
+
+    @property
+    def IN(self):
+        from ..utils import _ConnPortIn
+        return _ConnPortIn(self.input_slots, self)
+
+    @property
+    def OUT(self):
+        from ..utils import _ConnPortOut
+        return _ConnPortOut(self.output_slots, self)
 
 
     # def __rshift__(self, other):
@@ -333,6 +329,15 @@ class Sequential(Container):
                 args = (args,)
             kwargs = {}
         return args
+
+
+class VariableOutputs(Node):
+    def __init__(self, data: Dict[str, Any], /):
+        super().__init__(variable=True)
+        self.data = data
+
+    def run(self, **kwargs):
+        self.data.update(kwargs)
 
 
 class OutputNode(Node):
