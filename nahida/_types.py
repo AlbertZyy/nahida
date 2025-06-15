@@ -1,8 +1,9 @@
 from typing import (
     Any, Type, Optional,
-    Dict, Mapping,
+    Tuple, List, Dict, Mapping,
     Protocol
 )
+from inspect import _ParameterKind
 from dataclasses import dataclass, field
 from enum import IntEnum, auto
 
@@ -13,28 +14,27 @@ class SlotStatus(IntEnum):
     DISABLED = auto()
 
 
-class OutputSlot(Protocol):
-    ## Status
-    def get_status(self) -> SlotStatus: ...
-    def set_status(self, status: SlotStatus) -> None: ...
-    ## Connection
-    def get_source(self) -> "Node": ...
+@dataclass(slots=True)
+class DataBox():
+    has_data: bool = False
+    data: Any = None
 
 
-class InputSlot(Protocol):
-    ## Status
-    def get_status(self) -> SlotStatus: ...
-    def set_status(self, status: SlotStatus) -> None: ...
-    ## Default value
-    def has_value(self) -> bool: ...
-    def get_value(self) -> Any: ...
-    def set_value(self, value: Any, /) -> None: ...
-    def del_value(self) -> None: ...
-    ## Connection
-    def is_connected(self) -> bool: ...
-    def get_source(self) -> OutputSlot | None: ...
-    def connect(self, source: OutputSlot, /) -> None: ...
-    def disconnect(self) -> None: ...
+@dataclass(slots=True)
+class InputSlot():
+    status: SlotStatus = SlotStatus.ACTIVE
+    source_node: Optional["Node"] = None
+    source_slot: Optional[str] = None
+    has_default: bool = False
+    default: Any = None
+    param_kind: _ParameterKind = _ParameterKind.POSITIONAL_OR_KEYWORD
+    databox: Optional[DataBox] = None
+
+
+@dataclass(slots=True)
+class OutputSlot():
+    status: SlotStatus = SlotStatus.ACTIVE
+    databox: Optional[DataBox] = None
 
 
 class Node(Protocol):
@@ -42,9 +42,9 @@ class Node(Protocol):
     def input_slots(self) -> Mapping[str, InputSlot]: ...
     @property
     def output_slots(self) -> Mapping[str, OutputSlot]: ...
-    @property
-    def options(self) -> Mapping[str, Any]: ...
     def run(self, *args, **kwargs) -> Any: ...
+    def execute(self) -> "NodeExceptionData | None": ...
+    def dump_key(self, slot: str) -> Any: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -53,7 +53,8 @@ class NodeExceptionData():
     timestamp : float = 0.
     type : Type[Exception] = Exception
     message : Optional[str] = None
-    inputs : Dict[str, Any] = field(default_factory=dict)
+    positional_inputs : List[Any] = field(default_factory=list)
+    keyword_inputs : Dict[str, Any] = field(default_factory=dict)
 
 
 class NodeIOError(Exception):

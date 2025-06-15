@@ -1,2 +1,8 @@
-from .core.node import Node, Const
-from .core.graph import Graph, WORLD_GRAPH
+"""
+Nahida
+======
+General Computational Graph in Python
+"""
+
+from .core.node import *
+from .core.graph import *

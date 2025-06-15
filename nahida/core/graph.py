@@ -1,9 +1,8 @@
 from typing import Set, Dict, List, Iterable, Mapping, Any, Callable
 from collections import deque
-import time
 
 from .._types import (
-    SlotStatus, InputSlot, OutputSlot,
+    SlotStatus, DataBox, InputSlot,
     Node, NodeExceptionData, NodeIOError,
     GraphStatus, GraphStatusError
 )
@@ -13,7 +12,7 @@ __all__ = ["Graph", "WORLD_GRAPH"]
 
 class Graph():
     status : GraphStatus
-    context : Dict[OutputSlot, Any]
+    context : Dict[Any, DataBox]
     output_nodes : Dict[str, Node]
     error_listeners : List[Callable[[NodeExceptionData], Any]]
     status_listeners : List[Callable[[GraphStatus], Any]]
@@ -25,56 +24,33 @@ class Graph():
         self.error_listeners = []
         self.status_listeners = []
 
-    def _get_inputs(self, slots: Mapping[str, InputSlot]) -> Dict[str, Any]:
-        input_data = {}
-
+    @staticmethod
+    def _get_input_box(context, slots: Mapping[str, InputSlot]) -> None:
         for name, input_slot in slots.items():
-            slot_status = input_slot.get_status()
+            slot_status = input_slot.status
             if slot_status == SlotStatus.DISABLED:
                 continue
-            src_slot = input_slot.get_source()
+            src_node = input_slot.source_node
+            src_slot = input_slot.source_slot
 
-            if (src_slot is None) or (slot_status == SlotStatus.BLOCKED):
-                if input_slot.has_value():
-                    input_data[name] = input_slot.get_value()
+            if (src_node is not None) and (slot_status == SlotStatus.ACTIVE):
+                context_key = src_node.dump_key(src_slot)
+
+                if context_key in context:
+                    input_slot.databox = context[context_key]
                 else:
-                    raise NodeIOError(f"The '{name}' input of node "
-                                      f"'{self}' is not connected "
-                                       "and not having a default value.")
-            elif src_slot in self.context:
-                input_data[name] = self.context[src_slot]
-            else:
-                raise NodeIOError("Input data not found.")
-
-        return input_data
-
-    def _put_outputs(self, slots: Mapping[str, OutputSlot], results: Any) -> None:
-        if not isinstance(results, tuple):
-            results = (results,)
-
-        try:
-            enabled_slots = [
-                slot for slot in slots.values()
-                if slot.get_status() != SlotStatus.DISABLED
-            ]
-            for output_slot, result in zip(enabled_slots, results, strict=True):
-                if output_slot.get_status() != SlotStatus.BLOCKED:
-                    self.context[output_slot] = result
-        except ValueError:
-            raise NodeIOError(
-                f"Number of returns ({len(results)}) mismatch "
-                f"the number of enabled output slots."
-            )
+                    raise NodeIOError("Input data box is not found.")
 
     @staticmethod
-    def _capture_exception(node: Node, exception: Exception, inputs: Dict[str, Any]):
-        return NodeExceptionData(
-            node=node,
-            timestamp=time.time(),
-            type=type(exception),
-            message=str(exception),
-            inputs=inputs
-        )
+    def _put_output_box(context, node: Node) -> None:
+        slots = node.output_slots
+
+        for name, output_slot in slots.items():
+            if output_slot.status != SlotStatus.DISABLED:
+                context_key = node.dump_key(name)
+                data_box = DataBox()
+                context[context_key] = data_box
+                output_slot.databox = data_box
 
     def _send_exception(self, info: NodeExceptionData) -> None:
         for callback in self.error_listeners:
@@ -86,23 +62,26 @@ class Graph():
             for callback in self.status_listeners:
                 callback(self.status)
 
-    def execute(self) -> None:
+    def execute(self, retain_data=False) -> None:
         if self.status != GraphStatus.READY:
             raise GraphStatusError("Can only execute when graph is ready.")
 
         self._set_status(GraphStatus.RUN)
+        topological_sorted = self._topological_sort(self.output_nodes.values())
 
-        for node in self._topological_sort(self.output_nodes.values()):
-            input_data = self._get_inputs(node.input_slots)
-            try:
-                results = node.run(**input_data)
-            except Exception as exception:
+        for node in topological_sorted:
+            self._put_output_box(self.context, node)
+            self._get_input_box(self.context, node.input_slots)
+
+        if not retain_data:
+            self.context.clear()
+
+        for node in topological_sorted:
+            error_info = node.execute()
+            if error_info is not None:
                 self._set_status(GraphStatus.DEBUG)
-                error_info = self._capture_exception(node, exception, input_data)
                 self._send_exception(error_info)
                 break
-
-            self._put_outputs(node.output_slots, results)
         else:
             self._set_status(GraphStatus.STOP)
 
@@ -131,8 +110,8 @@ class Graph():
                 adj_list[current] = []
 
             for in_slot in current.input_slots.values():
-                if in_slot.is_connected():
-                    source_node = in_slot.get_source().get_source()
+                if in_slot.source_node is not None:
+                    source_node = in_slot.source_node
                     stack.append(source_node)
                     in_degree[current] += 1
 
@@ -165,17 +144,25 @@ class Graph():
 
     def OutputPort(self, name: str, /):
         if name in self.output_nodes:
-            return self.output_nodes[name].IN
+            raise KeyError(f"name `{name}` already exists as an output node.")
         else:
             from .node import OutputNode
             node = OutputNode()
             self.output_nodes[name] = node
             return node.IN
 
-    def addErrorListener(self, callback: Callable[[NodeExceptionData], Any]):
+    def Print(self, name: str, /):
+        if name in self.output_nodes:
+            raise KeyError(f"name `{name}` already exists as an output node.")
+        from .node import Node
+        node = Node(lambda val: print(val), ("val",), {"val": None})
+        self.output_nodes[name] = node
+        return node.IN
+
+    def register_error_hook(self, callback: Callable[[NodeExceptionData], Any]):
         self.error_listeners.append(callback)
 
-    def addStatusListener(self, callback: Callable[[GraphStatus], Any]):
+    def register_status_change_hook(self, callback: Callable[[GraphStatus], Any]):
         self.status_listeners.append(callback)
 
     __getitem__ = OutputPort
