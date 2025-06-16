@@ -1,7 +1,7 @@
 from typing import (
     Any, Type, Optional,
     Tuple, List, Dict, Mapping,
-    Protocol
+    Protocol, runtime_checkable
 )
 from inspect import _ParameterKind
 from dataclasses import dataclass, field
@@ -19,24 +19,50 @@ class DataBox():
     has_data: bool = False
     data: Any = None
 
+    def put(self, data: Any) -> None:
+        self.has_data = True
+        self.data = data
+
+    def get(self) -> Any:
+        if not self.has_data:
+            raise ValueError("DataBox is empty.")
+        return self.data
+
 
 @dataclass(slots=True)
-class InputSlot():
+class Slot():
     status: SlotStatus = SlotStatus.ACTIVE
+
+    def is_active(self) -> bool:
+        return self.status == SlotStatus.ACTIVE
+
+    def is_blocked(self) -> bool:
+        return self.status == SlotStatus.BLOCKED
+
+    def is_disabled(self) -> bool:
+        return self.status == SlotStatus.DISABLED
+
+
+@dataclass(slots=True)
+class InputSlot(Slot):
     source_node: Optional["Node"] = None
     source_slot: Optional[str] = None
     has_default: bool = False
     default: Any = None
     param_kind: _ParameterKind = _ParameterKind.POSITIONAL_OR_KEYWORD
-    databox: Optional[DataBox] = None
+
+    def is_connected(self) -> bool:
+        return self.is_active() \
+            and self.source_node is not None \
+            and self.source_slot is not None
 
 
 @dataclass(slots=True)
-class OutputSlot():
-    status: SlotStatus = SlotStatus.ACTIVE
-    databox: Optional[DataBox] = None
+class OutputSlot(Slot):
+    pass
 
 
+@runtime_checkable
 class Node(Protocol):
     @property
     def input_slots(self) -> Mapping[str, InputSlot]: ...
@@ -45,7 +71,6 @@ class Node(Protocol):
     @property
     def is_variable(self) -> bool: ...
     def run(self, *args, **kwargs) -> Any: ...
-    def execute(self) -> "NodeExceptionData | None": ...
     def dump_key(self, slot: str) -> Any: ...
 
 

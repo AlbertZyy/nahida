@@ -1,56 +1,29 @@
-from typing import Set, Dict, List, Iterable, Mapping, Any, Callable
+from typing import Set, Dict, List, Iterable, Any, Callable
+import time
 from collections import deque
 
 from .._types import (
-    SlotStatus, DataBox, InputSlot,
-    Node, NodeExceptionData, NodeIOError,
+    Node, NodeExceptionData,
     GraphStatus, GraphStatusError
 )
+from .context import NahidaRunningContext
 
 __all__ = ["Graph", "WORLD_GRAPH"]
 
 
 class Graph():
     status : GraphStatus
-    context : Dict[Any, DataBox]
+    context : NahidaRunningContext
     output_nodes : Dict[str, Node]
     error_listeners : List[Callable[[NodeExceptionData], Any]]
     status_listeners : List[Callable[[GraphStatus], Any]]
 
     def __init__(self):
         self.status = GraphStatus.READY
-        self.context = {}
+        self.context = NahidaRunningContext()
         self.output_nodes = {}
         self.error_listeners = []
         self.status_listeners = []
-
-    @staticmethod
-    def _get_input_box(context, slots: Mapping[str, InputSlot]) -> None:
-        for name, input_slot in slots.items():
-            slot_status = input_slot.status
-            if slot_status == SlotStatus.DISABLED:
-                continue
-            src_node = input_slot.source_node
-            src_slot = input_slot.source_slot
-
-            if (src_node is not None) and (slot_status == SlotStatus.ACTIVE):
-                context_key = src_node.dump_key(src_slot)
-
-                if context_key in context:
-                    input_slot.databox = context[context_key]
-                else:
-                    raise NodeIOError("Input data box is not found.")
-
-    @staticmethod
-    def _put_output_box(context, node: Node) -> None:
-        slots = node.output_slots
-
-        for name, output_slot in slots.items():
-            if output_slot.status != SlotStatus.DISABLED:
-                context_key = node.dump_key(name)
-                data_box = DataBox()
-                context[context_key] = data_box
-                output_slot.databox = data_box
 
     def _send_exception(self, info: NodeExceptionData) -> None:
         for callback in self.error_listeners:
@@ -62,23 +35,32 @@ class Graph():
             for callback in self.status_listeners:
                 callback(self.status)
 
-    def execute(self, retain_data=False) -> None:
+    def _capture_error(self, error: Exception, args, kwargs) -> NodeExceptionData:
+        return NodeExceptionData(
+                node=self,
+                timestamp=time.time(),
+                type=type(error),
+                message=str(error),
+                positional_inputs=args,
+                keyword_inputs=kwargs
+            )
+
+    def execute(self) -> None:
         if self.status != GraphStatus.READY:
             raise GraphStatusError("Can only execute when graph is ready.")
 
         self._set_status(GraphStatus.RUN)
         topological_sorted = self._topological_sort(self.output_nodes.values())
+        self.context.construct_databox_sharing(topological_sorted)
 
         for node in topological_sorted:
-            self._put_output_box(self.context, node)
-            self._get_input_box(self.context, node.input_slots)
-
-        if not retain_data:
-            self.context.clear()
-
-        for node in topological_sorted:
-            error_info = node.execute()
-            if error_info is not None:
+            args, kwargs = [], {}
+            try:
+                self.context.receive_data(node, args, kwargs)
+                results = node.run(*args, **kwargs)
+                self.context.send_data(node, results)
+            except Exception as error:
+                error_info = self._capture_error(error, args, kwargs)
                 self._set_status(GraphStatus.DEBUG)
                 self._send_exception(error_info)
                 break
@@ -110,7 +92,7 @@ class Graph():
                 adj_list[current] = []
 
             for in_slot in current.input_slots.values():
-                if in_slot.source_node is not None:
+                if in_slot.is_connected():
                     source_node = in_slot.source_node
                     stack.append(source_node)
                     in_degree[current] += 1

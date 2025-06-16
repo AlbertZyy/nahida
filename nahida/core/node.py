@@ -1,16 +1,12 @@
-from typing import Tuple, Dict, Mapping, Any, Callable, overload
+from typing import Tuple, Dict, Any, Callable, overload
 from collections import OrderedDict
 import inspect
 from inspect import _ParameterKind as _PK
-import time
 
 from .._types import (
     NodeTopologyError,
     InputSlot,
-    OutputSlot,
-    SlotStatus,
-    NodeIOError,
-    NodeExceptionData
+    OutputSlot
 )
 
 __all__ = [
@@ -133,85 +129,6 @@ class Node():
     def run(self, *args, **kwargs):
         if self._target:
             return self._target(*args, **kwargs)
-
-    def execute(self):
-        positional_only_data = []
-        keyword_data = {}
-
-        try:
-            self._execute_impl(positional_only_data, keyword_data)
-        except Exception as exception:
-            return NodeExceptionData(
-                node=self,
-                timestamp=time.time(),
-                type=type(exception),
-                message=str(exception),
-                positional_inputs=positional_only_data,
-                keyword_inputs=keyword_data
-            )
-
-        return None
-
-    def _execute_impl(self, positional_only_data, keyword_data):
-        for name, input_slot in self.input_slots.items():
-            slot_status = input_slot.status
-            if slot_status == SlotStatus.DISABLED:
-                continue
-            src_node = input_slot.source_node
-
-            if (src_node is None) or (slot_status == SlotStatus.BLOCKED):
-                if input_slot.has_default:
-                    data = input_slot.default
-                else:
-                    raise NodeIOError(f"The '{name}' input of node "
-                                      f"'{self}' is not connected "
-                                       "and not having a default value.")
-            else:
-                data_box = input_slot.databox
-                if data_box is None:
-                    raise NodeIOError("Input data box should be assigned before "
-                                      "getting the data")
-                elif data_box.has_data:
-                    data = data_box.data
-                else:
-                    raise NodeIOError("The input data does not appear, "
-                                      "maybe the calculation order is wrong")
-                # Release the data box
-                input_slot.databox = None
-
-            param_kind = input_slot.param_kind
-            if param_kind == _PK.POSITIONAL_ONLY:
-                positional_only_data.append(data)
-            elif param_kind == _PK.VAR_POSITIONAL:
-                assert isinstance(data, tuple)
-                positional_only_data.extend(data)
-            elif param_kind in (_PK.POSITIONAL_OR_KEYWORD, _PK.KEYWORD_ONLY):
-                keyword_data[name] = data
-            elif param_kind == _PK.VAR_KEYWORD:
-                assert isinstance(data, dict)
-                keyword_data.update(data)
-            else:
-                raise RuntimeError("Inappropriate parameter kind")
-
-        results = self.run(*positional_only_data, **keyword_data)
-        if not isinstance(results, tuple):
-            results = (results,)
-
-        available_slots = {
-            name: slot for name, slot in self.output_slots.items()
-            if slot.status != SlotStatus.DISABLED
-        }
-
-        for output_slot, data in zip(available_slots.values(), results):
-            data_box = output_slot.databox
-            if data_box is None:
-                raise NodeIOError("Output data box should be generated before "
-                                  "putting the data")
-            else:
-                data_box.data = data
-                data_box.has_data = True
-            # Release the data box
-            output_slot.databox = None
 
     @property
     def IN(self):

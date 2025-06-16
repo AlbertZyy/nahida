@@ -1,4 +1,4 @@
-from typing import Dict
+from typing import Dict, Tuple
 
 from ._types import InputSlot, OutputSlot, Node, NodeTopologyError
 
@@ -13,7 +13,7 @@ class _ConnPort():
         self._port.append(name)
         return self
 
-    def __getitem__(self, *names: str):
+    def __getitem__(self, names: str | Tuple[str, ...]):
         if len(names) == 1:
             names = names[0].split(",")
             names = [n.strip() for n in names]
