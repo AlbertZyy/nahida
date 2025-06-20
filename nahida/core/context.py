@@ -46,12 +46,13 @@ class NahidaCtxOperator:
                     raise NodeIOError(f"The databox for input '{repr(node)}.{name}' is empty, "
                                       f"make sure the calculation order is appropriate.")
                 data = databox.get()
+            elif input_slot.has_default:
+                data = input_slot.default
+            elif input_slot.param_kind in (_PK.VAR_KEYWORD, _PK.VAR_POSITIONAL):
+                continue # variable arguments can be empty
             else:
-                if input_slot.has_default:
-                    data = input_slot.default
-                else:
-                    raise NodeIOError(f"The input '{repr(node)}.{name}' is "
-                                      "not connected and not having a default value.")
+                raise NodeIOError(f"The input '{repr(node)}.{name}' is "
+                                  "not connected and not having a default value.")
 
             param_kind = input_slot.param_kind
             if param_kind == _PK.POSITIONAL_ONLY:

@@ -2,6 +2,7 @@ from typing import Tuple, Dict, Any, Callable, overload
 from collections import OrderedDict
 import inspect
 from inspect import _ParameterKind as _PK
+from functools import partial
 
 from .._types import (
     NodeTopologyError,
@@ -162,7 +163,11 @@ class Node():
     #     self.IN.recv(other) # port >> *Node -> *Node
     #     return self
 
-def inspected(target: Callable, /, inspector=None, output_name: str = "val"):
+@overload
+def inspected(outputs: str | Tuple[str, ...] = "out") -> Callable[[Callable], Node]: ...
+@overload
+def inspected(target: Callable, /, inspector=None, outputs: str | Tuple[str, ...] = "out") -> Node: ...
+def inspected(target: Callable | None, /, inspector=None, outputs: str | Tuple[str, ...] = "out"):
     """Initialize a node from callable.
 
     Args:
@@ -170,15 +175,19 @@ def inspected(target: Callable, /, inspector=None, output_name: str = "val"):
         inspector (Callable | str | None, optional): The object to get the arguments from.
             If it is a string, the attribute with the same name is taken from target.
             If it is None, target itself is used. Defaults to None.
-        output_name (str, optional): Name for the output slot.
+        outputs (str | Tuple[str, ...], optional): Name for the output slot.
 
     Returns:
         node: Node object.
     """
+    if target is None:
+        return partial(inspected, outputs=outputs)
     if inspector is None:
         inspector = target
     elif isinstance(inspector, str):
         inspector = getattr(target, inspector)
+    if isinstance(outputs, str):
+        outputs = (outputs,)
 
     sig = inspect.signature(inspector)
     inputs = []
@@ -192,8 +201,9 @@ def inspected(target: Callable, /, inspector=None, output_name: str = "val"):
         if param.default is not param.empty:
             defaults[name] = param.default
 
-    node = Node(target, inputs, defaults, (output_name,))
+    node = Node(target, inputs, defaults, outputs)
     node.set_param_kinds(param_kinds)
+
     return node
 
 

@@ -35,9 +35,10 @@ class Graph():
             for callback in self.status_listeners:
                 callback(self.status)
 
-    def _capture_error(self, error: Exception, args, kwargs) -> NodeExceptionData:
+    @staticmethod
+    def _capture_error(node: Node, error: Exception, args, kwargs) -> NodeExceptionData:
         return NodeExceptionData(
-                node=self,
+                node=node,
                 timestamp=time.time(),
                 type=type(error),
                 message=str(error),
@@ -60,7 +61,7 @@ class Graph():
                 results = node.run(*args, **kwargs)
                 self.context.send_data(node, results)
             except Exception as error:
-                error_info = self._capture_error(error, args, kwargs)
+                error_info = self._capture_error(node, error, args, kwargs)
                 self._set_status(GraphStatus.DEBUG)
                 self._send_exception(error_info)
                 break
