@@ -1,8 +1,5 @@
-from typing import (
-    Any, Type, Optional,
-    Tuple, List, Dict, Mapping,
-    Protocol, runtime_checkable
-)
+from typing import Any, Protocol, runtime_checkable
+from collections.abc import Mapping
 from inspect import _ParameterKind
 from dataclasses import dataclass, field
 from enum import IntEnum, auto
@@ -45,8 +42,8 @@ class Slot():
 
 @dataclass(slots=True)
 class InputSlot(Slot):
-    source_node: Optional["Node"] = None
-    source_slot: Optional[str] = None
+    source_node: "Node | None" = None
+    source_slot: str | None = None
     has_default: bool = False
     default: Any = None
     param_kind: _ParameterKind = _ParameterKind.POSITIONAL_OR_KEYWORD
@@ -78,10 +75,10 @@ class Node(Protocol):
 class NodeExceptionData():
     node : Node
     timestamp : float = 0.
-    type : Type[Exception] = Exception
-    message : Optional[str] = None
-    positional_inputs : List[Any] = field(default_factory=list)
-    keyword_inputs : Dict[str, Any] = field(default_factory=dict)
+    errtype : type[Exception] = Exception
+    message : str | None = None
+    positional_inputs : list[Any] = field(default_factory=list)
+    keyword_inputs : dict[str, Any] = field(default_factory=dict)
 
 
 class NodeIOError(Exception):

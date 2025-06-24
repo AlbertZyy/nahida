@@ -1,10 +1,9 @@
-from typing import Dict, Tuple
 
 from ._types import InputSlot, OutputSlot, Node, NodeTopologyError
 
 
 class _ConnPort():
-    def __init__(self, container: Dict, node: Node):
+    def __init__(self, container: dict, node: Node):
         self._node = node
         self._container = container
         self._port = []
@@ -13,14 +12,14 @@ class _ConnPort():
         self._port.append(name)
         return self
 
-    def __getitem__(self, names: str | Tuple[str, ...]):
+    def __getitem__(self, names: str | tuple[str, ...]):
         if len(names) == 1:
             names = names[0].split(",")
             names = [n.strip() for n in names]
         self._port = list(names)
         return self
 
-    def get_slot(self) -> Dict[str, InputSlot | OutputSlot]:
+    def get_slot(self) -> dict[str, InputSlot | OutputSlot]:
         if len(self._port) == 0:
             return self._container
         return {p: self._container[p] for p in self._port}

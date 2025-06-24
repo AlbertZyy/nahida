@@ -1,4 +1,5 @@
-from typing import Iterable, Tuple, List, Dict, Any
+from typing import Any
+from collections.abc import Iterable
 import inspect
 
 from .._types import DataBox, NodeIOError, Node
@@ -8,7 +9,7 @@ _PK = inspect._ParameterKind  # type: ignore[reportPrivateUsage]
 
 class NahidaCtxOperator:
     @staticmethod
-    def construct_databox_sharing(node: Node, recognition_ctx: Dict, sharing_ctx: Dict) -> None:
+    def construct_databox_sharing(node: Node, recognition_ctx: dict, sharing_ctx: dict) -> None:
         for name, output_slot in node.output_slots.items():
             if output_slot.is_active():
                 context_key = node.dump_key(name)
@@ -28,10 +29,10 @@ class NahidaCtxOperator:
 
     @staticmethod
     def receive_data(
-        sharing_ctx: Dict[Any, DataBox],
+        sharing_ctx: dict[Any, DataBox],
         node: Node,
-        positional_only: List,
-        keyword: Dict[str, Any]
+        positional_only: list,
+        keyword: dict[str, Any]
     ) -> None:
         for name, input_slot in node.input_slots.items():
             if input_slot.is_disabled():
@@ -70,9 +71,9 @@ class NahidaCtxOperator:
 
     @staticmethod
     def send_data(
-        sharing_ctx: Dict[Any, DataBox],
+        sharing_ctx: dict[Any, DataBox],
         node: Node,
-        results: Any | Tuple[Any, ...]
+        results: Any | tuple[Any, ...]
     ) -> None:
         if not isinstance(results, tuple):
             results = (results,)
@@ -104,25 +105,25 @@ class NahidaCtxOperator:
 
 
 class NahidaRunningContext():
-    sharing_ctx: Dict[Any, DataBox]
+    sharing_ctx: dict[Any, DataBox]
 
     def __init__(self):
         self.sharing_ctx = {}
 
     def construct_databox_sharing(self, nodes: Iterable[Node]) -> None:
         """Construct the data box sharing context for a list of nodes."""
-        recognition_ctx: Dict[Any, DataBox] = {}
+        recognition_ctx: dict[Any, DataBox] = {}
 
         for node in nodes:
             if not isinstance(node, Node):
                 raise TypeError(f"Expected a Node instance, got {type(node)}")
             NahidaCtxOperator.construct_databox_sharing(node, recognition_ctx, self.sharing_ctx)
 
-    def receive_data(self, node: Node, positional_only: List, keyword: Dict[str, Any]) -> None:
+    def receive_data(self, node: Node, positional_only: list, keyword: dict[str, Any]) -> None:
         """Receive data from the context for a specific node, populating positional and keyword arguments."""
         return NahidaCtxOperator.receive_data(self.sharing_ctx, node, positional_only, keyword)
 
-    def send_data(self, node: Node, results: Any | Tuple[Any, ...]) -> None:
+    def send_data(self, node: Node, results: Any | tuple[Any, ...]) -> None:
         """Send data from a node to the context, storing it in the appropriate data boxes."""
         return NahidaCtxOperator.send_data(self.sharing_ctx, node, results)
 

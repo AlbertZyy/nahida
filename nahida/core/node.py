@@ -1,4 +1,5 @@
-from typing import Tuple, Dict, Any, Callable, overload
+from typing import Any, overload
+from collections.abc import Callable
 from collections import OrderedDict
 import inspect
 from inspect import _ParameterKind as _PK
@@ -25,9 +26,9 @@ class Node():
     def __init__(
         self,
         target=None,
-        inputs: Tuple[str, ...] = (),
-        defaults: Dict[str, Any] = {},
-        outputs: Tuple[str, ...] = (),
+        inputs: tuple[str, ...] = (),
+        defaults: dict[str, Any] = {},
+        outputs: tuple[str, ...] = (),
         variable: bool = False
     ):
         r"""Initialize a compute node."""
@@ -94,7 +95,7 @@ class Node():
         else:
             self._output_slots[name] = OutputSlot()
 
-    def set_param_kinds(self, kinds: Dict[str, _PK]):
+    def set_param_kinds(self, kinds: dict[str, _PK]):
         for name, kind in kinds.items():
             if name in self._input_slots:
                 input_slot = self._input_slots[name]
@@ -164,10 +165,10 @@ class Node():
     #     return self
 
 @overload
-def inspected(outputs: str | Tuple[str, ...] = "out") -> Callable[[Callable], Node]: ...
+def inspected(outputs: str | tuple[str, ...] = "out") -> Callable[[Callable], Node]: ...
 @overload
-def inspected(target: Callable, /, inspector=None, outputs: str | Tuple[str, ...] = "out") -> Node: ...
-def inspected(target: Callable | None, /, inspector=None, outputs: str | Tuple[str, ...] = "out"):
+def inspected(target: Callable, /, inspector=None, outputs: str | tuple[str, ...] = "out") -> Node: ...
+def inspected(target: Callable | None, /, inspector=None, outputs: str | tuple[str, ...] = "out"):
     """Initialize a node from callable.
 
     Args:
@@ -221,7 +222,7 @@ class Const(Node):
 
 
 class Container(Node):
-    nodes : Tuple[Node, ...]
+    nodes : tuple[Node, ...]
 
     def __len__(self) -> int:
         return len(self.nodes)
@@ -259,7 +260,7 @@ class Sequential(Container):
 
 
 class VariableOutputs(Node):
-    def __init__(self, data: Dict[str, Any], /):
+    def __init__(self, data: dict[str, Any], /):
         super().__init__(variable=True)
         self.data = data
 

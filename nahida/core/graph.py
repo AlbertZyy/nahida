@@ -1,4 +1,5 @@
-from typing import Set, Dict, List, Iterable, Any, Callable
+from typing import Any
+from collections.abc import Callable, Iterable
 import time
 from collections import deque
 
@@ -14,9 +15,9 @@ __all__ = ["Graph", "WORLD_GRAPH"]
 class Graph():
     status : GraphStatus
     context : NahidaRunningContext
-    output_nodes : Dict[str, Node]
-    error_listeners : List[Callable[[NodeExceptionData], Any]]
-    status_listeners : List[Callable[[GraphStatus], Any]]
+    output_nodes : dict[str, Node]
+    error_listeners : list[Callable[[NodeExceptionData], Any]]
+    status_listeners : list[Callable[[GraphStatus], Any]]
 
     def __init__(self):
         self.status = GraphStatus.READY
@@ -40,7 +41,7 @@ class Graph():
         return NodeExceptionData(
                 node=node,
                 timestamp=time.time(),
-                type=type(error),
+                errtype=type(error),
                 message=str(error),
                 positional_inputs=args,
                 keyword_inputs=kwargs
@@ -76,9 +77,9 @@ class Graph():
     def _collect_relevant_nodes(nodes: Iterable[Node]):
         """Collect all relevant upstream nodes from output nodes."""
         stack = list(nodes)
-        visited   : Set[Node]              = set()
-        in_degree : Dict[Node, int]        = {}
-        adj_list  : Dict[Node, List[Node]] = {}
+        visited   : set[Node]              = set()
+        in_degree : dict[Node, int]        = {}
+        adj_list  : dict[Node, list[Node]] = {}
 
         while stack:
             current = stack.pop()
@@ -106,7 +107,7 @@ class Graph():
         return in_degree, adj_list
 
     @staticmethod
-    def _topological_sort(nodes: Iterable[Node]) -> List[Node]:
+    def _topological_sort(nodes: Iterable[Node]) -> list[Node]:
         in_degree, adj_list = Graph._collect_relevant_nodes(nodes)
 
         queue = deque(node for node, degree in in_degree.items() if degree == 0)
