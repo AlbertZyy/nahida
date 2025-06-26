@@ -41,17 +41,41 @@ class Slot():
 
 
 @dataclass(slots=True)
-class InputSlot(Slot):
-    source_node: "Node | None" = None
-    source_slot: str | None = None
+class _InputSlot(Slot):
+    param_name: str | None = None
     has_default: bool = False
     default: Any = None
     param_kind: _ParameterKind = _ParameterKind.POSITIONAL_OR_KEYWORD
+
+
+@dataclass(slots=True)
+class InputSlot(_InputSlot):
+    source_node: "Node | None" = field(default=None, init=False, compare=False)
+    source_slot: str | None = field(default=None, init=False, compare=False)
 
     def is_connected(self) -> bool:
         return self.is_active() \
             and self.source_node is not None \
             and self.source_slot is not None
+
+
+@dataclass(slots=True)
+class VariableSlot(_InputSlot):
+    source_node: list["Node"] = field(default_factory=list, init=False, compare=False)
+    source_slot: list[str] = field(default_factory=list, init=False, compare=False)
+
+    def is_connected(self) -> bool:
+        return self.is_active() \
+            and self.source_node \
+            and self.source_slot
+
+    def __post_init__(self) -> None:
+        if self.param_kind == _ParameterKind.VAR_KEYWORD:
+            raise TypeError("data from variable slots are not allowed to be "
+                            "variable keyword arguments")
+
+    def __len__(self) -> int:
+        return len(self.source_node)
 
 
 @dataclass(slots=True)

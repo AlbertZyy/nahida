@@ -62,7 +62,11 @@ class NahidaCtxOperator:
                 assert isinstance(data, tuple)
                 positional_only.extend(data)
             elif param_kind in (_PK.POSITIONAL_OR_KEYWORD, _PK.KEYWORD_ONLY):
-                keyword[name] = data
+                param_name = input_slot.param_name
+                if param_name is None:
+                    raise NodeIOError("Parameter name is expected if the parameter "
+                                      "kind is not POSITIONAL_ONLY or variable length.")
+                keyword[param_name] = data
             elif param_kind == _PK.VAR_KEYWORD:
                 assert isinstance(data, dict)
                 keyword.update(data)

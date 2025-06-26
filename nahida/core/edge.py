@@ -30,16 +30,16 @@ class OutputAddress:
 
     def _take_the_first_port(self) -> None:
         for name in self._node.output_slots.keys():
-            self._port = name
+            self._slot = name
             break
 
     def get_addr(self) -> tuple[Node, str]:
-        if self._port is None:
+        if self._slot is None:
             self._take_the_first_port()
-        elif self._port not in self._node.output_slots:
-            raise NodeTopologyError(f"Output slot {self._port} does not exist")
+        elif self._slot not in self._node.output_slots:
+            raise NodeTopologyError(f"Output slot {self._slot} does not exist")
 
-        return self._node, self._port
+        return self._node, self._slot
 
 
 def connect_from_address(

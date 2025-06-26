@@ -48,10 +48,10 @@ class Node():
                 self.register_output(out_arg)
 
     @overload
-    def register_input(self, name: str) -> None: ...
+    def register_input(self, name: str, signature: str | None = None) -> None: ...
     @overload
-    def register_input(self, name: str, *, default: Any) -> None: ...
-    def register_input(self, name: str, **kwargs):
+    def register_input(self, name: str, signature: str | None = None, *, default: Any) -> None: ...
+    def register_input(self, name: str, signature: str | None = None, **kwargs):
         """Add an input slot to the node."""
         if "_input_slots" not in self.__dict__:
             raise AttributeError(
@@ -68,9 +68,16 @@ class Node():
         elif hasattr(self, name) and name not in self._input_slots:
             raise KeyError(f"attribute '{name}' already exists")
         else:
+            if signature is None:
+                signature = name
+
+            param_name, param_kind = parse_signature(signature)
+
             self._input_slots[name] = InputSlot(
+                param_name=param_name,
                 has_default="default" in kwargs,
-                default=kwargs.get("default", None)
+                default=kwargs.get("default", None),
+                param_kind=param_kind
             )
 
     def register_output(self, name: str) -> None:
@@ -276,3 +283,28 @@ class OutputNode(Node):
     @property
     def value(self):
         return self._value
+
+
+def parse_signature(signature: str) -> tuple[str | None, _PK]:
+    """Get the name and kind of the parameter used by the node to call the function.
+
+    Args:
+        signature (str): The signature of a parameter.
+            - `'/'` - positional only
+            - `'*'` - variable positional
+            - `'{name}'` - positional or keyword
+            - `'{name}='` - keyword only
+            - `'**'` - variable keyword
+    """
+    signature = signature.strip()
+
+    if signature == "/":
+        return None, _PK.POSITIONAL_ONLY
+    elif signature == "*":
+        return None, _PK.VAR_POSITIONAL
+    elif signature == "**":
+        return None, _PK.VAR_KEYWORD
+    elif signature.endswith("="):
+        return signature[:-1].strip(), _PK.KEYWORD_ONLY
+    else:
+        return signature, _PK.POSITIONAL_OR_KEYWORD
