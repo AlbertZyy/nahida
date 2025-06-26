@@ -5,11 +5,8 @@ import inspect
 from inspect import _ParameterKind as _PK
 from functools import partial
 
-from .._types import (
-    NodeTopologyError,
-    InputSlot,
-    OutputSlot
-)
+from . import edge as _E
+from ._types import NodeTopologyError, InputSlot, OutputSlot
 
 __all__ = [
     "Node",
@@ -132,15 +129,9 @@ class Node():
         if self._target:
             return self._target(*args, **kwargs)
 
-    @property
-    def IN(self):
-        from ..utils import _ConnPortIn
-        return _ConnPortIn(self.input_slots, self)
-
-    @property
-    def OUT(self):
-        from ..utils import _ConnPortOut
-        return _ConnPortOut(self.output_slots, self)
+    def __call__(self, **kwargs: _E.OutputAddress):
+        _E.connect_from_address(self.input_slots, kwargs)
+        return _E.OutputAddress(self, None)
 
 
     # def __rshift__(self, other):
@@ -165,7 +156,7 @@ class Node():
     #     return self
 
 @overload
-def inspected(outputs: str | tuple[str, ...] = "out") -> Callable[[Callable], Node]: ...
+def inspected(*, outputs: str | tuple[str, ...] = "out") -> Callable[[Callable], Node]: ...
 @overload
 def inspected(target: Callable, /, inspector=None, outputs: str | tuple[str, ...] = "out") -> Node: ...
 def inspected(target: Callable | None, /, inspector=None, outputs: str | tuple[str, ...] = "out"):

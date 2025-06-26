@@ -2,7 +2,7 @@ from typing import Any
 from collections.abc import Iterable
 import inspect
 
-from .._types import DataBox, NodeIOError, Node
+from ._types import DataBox, NodeIOError, Node
 
 _PK = inspect._ParameterKind  # type: ignore[reportPrivateUsage]
 
@@ -75,17 +75,18 @@ class NahidaCtxOperator:
         node: Node,
         results: Any | tuple[Any, ...]
     ) -> None:
-        if not isinstance(results, tuple):
-            results = (results,)
-
         available_slots = {
             name: slot for name, slot in node.output_slots.items()
             if not slot.is_disabled()
         }
-        if len(results) != len(available_slots):
+
+        if not isinstance(results, tuple):
+            results = (results,)
+
+        if len(results) < len(available_slots):
             raise NodeIOError(
                 f"Number of non-disabled output slots ({len(available_slots)}) "
-                f"must match the number of returns ({len(results)}), "
+                f"is greater than the number of returns ({len(results)}), "
                 f"for the node '{repr(node)}'."
             )
         for (name, output_slot), data in zip(available_slots.items(), results):
@@ -104,7 +105,7 @@ class NahidaCtxOperator:
                 databox.put(data)
 
 
-class NahidaRunningContext():
+class NahidaRunningContext:
     sharing_ctx: dict[Any, DataBox]
 
     def __init__(self):

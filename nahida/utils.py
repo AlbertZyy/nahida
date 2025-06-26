@@ -1,5 +1,5 @@
 
-from ._types import InputSlot, OutputSlot, Node, NodeTopologyError
+from .core._types import InputSlot, OutputSlot, Node, NodeTopologyError
 
 
 class _ConnPort():

@@ -3,10 +3,11 @@ from collections.abc import Callable, Iterable
 import time
 from collections import deque
 
-from .._types import (
+from ._types import (
     Node, NodeExceptionData,
     GraphStatus, GraphStatusError
 )
+from .node import inspected
 from .context import NahidaRunningContext
 
 __all__ = ["Graph", "WORLD_GRAPH"]
@@ -15,14 +16,14 @@ __all__ = ["Graph", "WORLD_GRAPH"]
 class Graph():
     status : GraphStatus
     context : NahidaRunningContext
-    output_nodes : dict[str, Node]
+    output_nodes : list[Node]
     error_listeners : list[Callable[[NodeExceptionData], Any]]
     status_listeners : list[Callable[[GraphStatus], Any]]
 
     def __init__(self):
         self.status = GraphStatus.READY
         self.context = NahidaRunningContext()
-        self.output_nodes = {}
+        self.output_nodes = []
         self.error_listeners = []
         self.status_listeners = []
 
@@ -52,7 +53,7 @@ class Graph():
             raise GraphStatusError("Can only execute when graph is ready.")
 
         self._set_status(GraphStatus.RUN)
-        topological_sorted = self._topological_sort(self.output_nodes.values())
+        topological_sorted = self._topological_sort(self.output_nodes)
         self.context.construct_databox_sharing(topological_sorted)
 
         for node in topological_sorted:
@@ -126,30 +127,16 @@ class Graph():
 
         return sorted_nodes
 
-    def OutputPort(self, name: str, /):
-        if name in self.output_nodes:
-            raise KeyError(f"name `{name}` already exists as an output node.")
-        else:
-            from .node import OutputNode
-            node = OutputNode()
-            self.output_nodes[name] = node
-            return node.IN
-
-    def Print(self, name: str, /):
-        if name in self.output_nodes:
-            raise KeyError(f"name `{name}` already exists as an output node.")
-        from .node import Node
-        node = Node(lambda val: print(val), ("val",), {"val": None})
-        self.output_nodes[name] = node
-        return node.IN
-
     def register_error_hook(self, callback: Callable[[NodeExceptionData], Any]):
         self.error_listeners.append(callback)
 
     def register_status_change_hook(self, callback: Callable[[GraphStatus], Any]):
         self.status_listeners.append(callback)
 
-    __getitem__ = OutputPort
+    def register_output_node(self, handler: Callable[..., None]):
+        node = inspected(handler, outputs=())
+        self.output_nodes.append(node)
+        return node
 
 
 WORLD_GRAPH = Graph()
