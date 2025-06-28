@@ -1,35 +1,45 @@
-from typing import Any
+from typing import Any, TypeVar
 from collections.abc import Iterable
 import inspect
 
 from ._types import DataBox, NodeIOError, Node
 
 _PK = inspect._ParameterKind  # type: ignore[reportPrivateUsage]
+_T = TypeVar("_T")
 
 
 class NahidaCtxOperator:
     @staticmethod
-    def construct_databox_sharing(node: Node, recognition_ctx: dict, sharing_ctx: dict) -> None:
+    def construct_supply_demand(
+        node: Node,
+        supply_ctx: dict[_T, DataBox],
+        demand_ctx: dict[_T, list[DataBox]]
+    ) -> None:
         for name, output_slot in node.output_slots.items():
             if output_slot.is_active():
                 context_key = node.dump_key(name)
                 data_box = DataBox()
-                recognition_ctx[context_key] = data_box
-                sharing_ctx[node.dump_key(name)] = data_box
+                supply_ctx[context_key] = data_box
 
         for name, input_slot in node.input_slots.items():
-            if input_slot.is_connected():
-                context_key = input_slot.source_node.dump_key(input_slot.source_slot)
+            if not input_slot.is_active(): continue
+            for source in input_slot.source_list:
+                source_key = source.node.dump_key(source.slot)
 
-                if context_key in recognition_ctx:
-                    data_box = recognition_ctx[context_key]
-                    sharing_ctx[node.dump_key(name)] = data_box
+                if source_key in supply_ctx:
+                    data_box = supply_ctx[source_key]
+                    context_key = node.dump_key(name)
+
+                    if context_key not in demand_ctx:
+                        demand_ctx[context_key] = []
+
+                    demand_ctx[context_key].append(data_box)
                 else:
                     raise NodeIOError("Input data box is not found.")
 
     @staticmethod
     def receive_data(
-        sharing_ctx: dict[Any, DataBox],
+        demand_ctx: dict[Any, list[DataBox]],
         node: Node,
         positional_only: list,
         keyword: dict[str, Any]
@@ -39,21 +49,25 @@ class NahidaCtxOperator:
                 continue
 
             if input_slot.is_connected():
-                databox = sharing_ctx.pop(node.dump_key(name), None)
-                if databox is None:
+                databox_list = demand_ctx.pop(node.dump_key(name), None)
+                if databox_list is None:
                     raise NodeIOError(f"No databox found for the input '{repr(node)}.{name}', "
                                       "construct the databox sharing first.")
-                if not databox.has_data:
-                    raise NodeIOError(f"The databox for input '{repr(node)}.{name}' is empty, "
-                                      f"make sure the calculation order is appropriate.")
-                data = databox.get()
+                if input_slot.variable:
+                    data = tuple(databox.get() for databox in databox_list)
+                else:
+                    assert len(databox_list) == 1
+                    databox = databox_list[0]
+                    if not databox.has_data:
+                        raise NodeIOError(
+                            f"The databox for input '{repr(node)}.{name}' is empty, "
+                            f"make sure the calculation order is appropriate."
+                        )
+                    data = databox.get()
             elif input_slot.has_default:
                 data = input_slot.default
-            elif input_slot.param_kind in (_PK.VAR_KEYWORD, _PK.VAR_POSITIONAL):
-                continue # variable arguments can be empty
             else:
-                raise NodeIOError(f"The input '{repr(node)}.{name}' is "
-                                  "not connected and not having a default value.")
+                continue
 
             param_kind = input_slot.param_kind
             if param_kind == _PK.POSITIONAL_ONLY:
@@ -75,7 +89,7 @@ class NahidaCtxOperator:
 
     @staticmethod
     def send_data(
-        sharing_ctx: dict[Any, DataBox],
+        supply_ctx: dict[Any, DataBox],
         node: Node,
         results: Any | tuple[Any, ...]
     ) -> None:
@@ -95,7 +109,7 @@ class NahidaCtxOperator:
             )
         for (name, output_slot), data in zip(available_slots.items(), results):
             if output_slot.is_active():
-                databox = sharing_ctx.pop(node.dump_key(name), None)
+                databox = supply_ctx.pop(node.dump_key(name), None)
                 if databox is None:
                     raise NodeIOError(
                         f"No databox found for the output slot '{repr(node)}.{name}', "
@@ -110,28 +124,29 @@ class NahidaCtxOperator:
 
 
 class NahidaRunningContext:
-    sharing_ctx: dict[Any, DataBox]
+    supply_ctx: dict[Any, DataBox]
+    demand_ctx: dict[Any, list[DataBox]]
 
     def __init__(self):
-        self.sharing_ctx = {}
+        self.supply_ctx = {}
+        self.demand_ctx = {}
 
-    def construct_databox_sharing(self, nodes: Iterable[Node]) -> None:
+    def construct_supply_demand(self, nodes: Iterable[Node]) -> None:
         """Construct the data box sharing context for a list of nodes."""
-        recognition_ctx: dict[Any, DataBox] = {}
-
         for node in nodes:
             if not isinstance(node, Node):
                 raise TypeError(f"Expected a Node instance, got {type(node)}")
-            NahidaCtxOperator.construct_databox_sharing(node, recognition_ctx, self.sharing_ctx)
+            NahidaCtxOperator.construct_supply_demand(node, self.supply_ctx, self.demand_ctx)
 
     def receive_data(self, node: Node, positional_only: list, keyword: dict[str, Any]) -> None:
         """Receive data from the context for a specific node, populating positional and keyword arguments."""
-        return NahidaCtxOperator.receive_data(self.sharing_ctx, node, positional_only, keyword)
+        return NahidaCtxOperator.receive_data(self.demand_ctx, node, positional_only, keyword)
 
     def send_data(self, node: Node, results: Any | tuple[Any, ...]) -> None:
         """Send data from a node to the context, storing it in the appropriate data boxes."""
-        return NahidaCtxOperator.send_data(self.sharing_ctx, node, results)
+        return NahidaCtxOperator.send_data(self.supply_ctx, node, results)
 
     def clear(self) -> None:
         """Clear the context, removing all data boxes."""
-        self.sharing_ctx.clear()
+        self.supply_ctx.clear()
+        self.demand_ctx.clear()

@@ -1,4 +1,5 @@
-from typing import Any, Protocol, runtime_checkable
+from typing import Any, Protocol, runtime_checkable, NamedTuple
+from collections import namedtuple
 from collections.abc import Mapping
 from inspect import _ParameterKind
 from dataclasses import dataclass, field
@@ -11,10 +12,10 @@ class SlotStatus(IntEnum):
     DISABLED = auto()
 
 
-@dataclass(slots=True)
-class DataBox():
-    has_data: bool = False
-    data: Any = None
+@dataclass(eq=False, match_args=False, slots=True)
+class DataBox:
+    has_data: bool = field(default=False, init=False)
+    data: Any = field(default=None, init=False)
 
     def put(self, data: Any) -> None:
         self.has_data = True
@@ -24,6 +25,12 @@ class DataBox():
         if not self.has_data:
             raise ValueError("DataBox is empty.")
         return self.data
+
+
+class SourceAddr(NamedTuple):
+    """A named tuple containing the source node and slot name."""
+    node: "Node"
+    slot: str
 
 
 @dataclass(slots=True)
@@ -41,41 +48,27 @@ class Slot():
 
 
 @dataclass(slots=True)
-class _InputSlot(Slot):
-    param_name: str | None = None
+class InputSlot(Slot):
     has_default: bool = False
     default: Any = None
+    param_name: str | None = None
     param_kind: _ParameterKind = _ParameterKind.POSITIONAL_OR_KEYWORD
-
-
-@dataclass(slots=True)
-class InputSlot(_InputSlot):
-    source_node: "Node | None" = field(default=None, init=False, compare=False)
-    source_slot: str | None = field(default=None, init=False, compare=False)
-
-    def is_connected(self) -> bool:
-        return self.is_active() \
-            and self.source_node is not None \
-            and self.source_slot is not None
-
-
-@dataclass(slots=True)
-class VariableSlot(_InputSlot):
-    source_node: list["Node"] = field(default_factory=list, init=False, compare=False)
-    source_slot: list[str] = field(default_factory=list, init=False, compare=False)
-
-    def is_connected(self) -> bool:
-        return self.is_active() \
-            and self.source_node \
-            and self.source_slot
+    variable: bool = False
+    source_list: list[SourceAddr] = field(default_factory=list, init=False, compare=False)
 
     def __post_init__(self) -> None:
-        if self.param_kind == _ParameterKind.VAR_KEYWORD:
+        if self.param_kind == _ParameterKind.VAR_KEYWORD and self.variable:
             raise TypeError("data from variable slots are not allowed to be "
                             "variable keyword arguments")
 
-    def __len__(self) -> int:
-        return len(self.source_node)
+    def is_connected(self) -> bool:
+        return len(self.source_list) > 0
+
+    def connect(self, source: "Node", slot: str):
+        if self.variable or not self.is_connected():
+            self.source_list.append(SourceAddr(source, slot))
+        else:
+            raise NodeTopologyError("multiple connections to non-variable input")
 
 
 @dataclass(slots=True)

@@ -47,11 +47,13 @@ class Node():
             for out_arg in outputs:
                 self.register_output(out_arg)
 
-    @overload
-    def register_input(self, name: str, signature: str | None = None) -> None: ...
-    @overload
-    def register_input(self, name: str, signature: str | None = None, *, default: Any) -> None: ...
-    def register_input(self, name: str, signature: str | None = None, **kwargs):
+    def register_input(
+            self,
+            name: str,
+            variable: bool = False,
+            parameter: str | _PK | None = None,
+            **kwargs
+    ):
         """Add an input slot to the node."""
         if "_input_slots" not in self.__dict__:
             raise AttributeError(
@@ -68,16 +70,19 @@ class Node():
         elif hasattr(self, name) and name not in self._input_slots:
             raise KeyError(f"attribute '{name}' already exists")
         else:
-            if signature is None:
-                signature = name
-
-            param_name, param_kind = parse_signature(signature)
+            if isinstance(parameter, _PK):
+                param_name, param_kind = name, parameter
+            else:
+                if parameter is None:
+                    parameter = name
+                param_name, param_kind = parse_signature(parameter)
 
             self._input_slots[name] = InputSlot(
-                param_name=param_name,
                 has_default="default" in kwargs,
                 default=kwargs.get("default", None),
-                param_kind=param_kind
+                param_name=param_name,
+                param_kind=param_kind,
+                variable=variable
             )
 
     def register_output(self, name: str) -> None:
@@ -136,9 +141,13 @@ class Node():
         if self._target:
             return self._target(*args, **kwargs)
 
-    def __call__(self, **kwargs: _E.OutputAddress):
+    def __call__(self, **kwargs: _E.AddrHandler):
+        if self._variable:
+            for name in kwargs.keys():
+                if name not in self.input_slots:
+                    self.register_input(name, variable=False)
         _E.connect_from_address(self.input_slots, kwargs)
-        return _E.OutputAddress(self, None)
+        return _E.AddrHandler(self, None)
 
 
     # def __rshift__(self, other):
@@ -162,11 +171,18 @@ class Node():
     #     self.IN.recv(other) # port >> *Node -> *Node
     #     return self
 
-@overload
-def inspected(*, outputs: str | tuple[str, ...] = "out") -> Callable[[Callable], Node]: ...
-@overload
-def inspected(target: Callable, /, inspector=None, outputs: str | tuple[str, ...] = "out") -> Node: ...
-def inspected(target: Callable | None, /, inspector=None, outputs: str | tuple[str, ...] = "out"):
+# @overload
+# def inspected(*, outputs: str | tuple[str, ...] = "out") -> Callable[[Callable], Node]: ...
+# @overload
+# def inspected(target: Callable, /, inspector=None, outputs: str | tuple[str, ...] = "out") -> Node: ...
+def inspected(
+        target: Callable | None,
+        /,
+        inspector: Callable | str | None = None,
+        var_slot: bool = True,
+        var_node: bool = True,
+        outputs: str | tuple[str, ...] = "out"
+):
     """Initialize a node from callable.
 
     Args:
@@ -179,8 +195,6 @@ def inspected(target: Callable | None, /, inspector=None, outputs: str | tuple[s
     Returns:
         node: Node object.
     """
-    if target is None:
-        return partial(inspected, outputs=outputs)
     if inspector is None:
         inspector = target
     elif isinstance(inspector, str):
@@ -189,19 +203,25 @@ def inspected(target: Callable | None, /, inspector=None, outputs: str | tuple[s
         outputs = (outputs,)
 
     sig = inspect.signature(inspector)
-    inputs = []
-    defaults = {}
-    param_kinds = {}
+    node = Node(target)
 
     for name, param in sig.parameters.items():
-        inputs.append(name)
-        param_kinds[name] = param.kind
+        param.annotation
+        kwargs = {"name": name, "parameter": param.kind}
+
+        if var_slot and param.kind == _PK.VAR_POSITIONAL:
+            kwargs["variable"] = True
+
+        if var_node and param.kind == _PK.VAR_KEYWORD:
+            node._variable = True
 
         if param.default is not param.empty:
-            defaults[name] = param.default
+            kwargs["default"] = param.default
 
-    node = Node(target, inputs, defaults, outputs)
-    node.set_param_kinds(param_kinds)
+        node.register_input(**kwargs)
+
+    for name in outputs:
+        node.register_output(name)
 
     return node
 
@@ -285,26 +305,26 @@ class OutputNode(Node):
         return self._value
 
 
-def parse_signature(signature: str) -> tuple[str | None, _PK]:
+def parse_signature(parameter: str) -> tuple[str | None, _PK]:
     """Get the name and kind of the parameter used by the node to call the function.
 
     Args:
-        signature (str): The signature of a parameter.
+        parameter (str): The parameter of a parameter.
             - `'/'` - positional only
             - `'*'` - variable positional
             - `'{name}'` - positional or keyword
             - `'{name}='` - keyword only
             - `'**'` - variable keyword
     """
-    signature = signature.strip()
+    parameter = parameter.strip()
 
-    if signature == "/":
+    if parameter == "/":
         return None, _PK.POSITIONAL_ONLY
-    elif signature == "*":
+    elif parameter == "*":
         return None, _PK.VAR_POSITIONAL
-    elif signature == "**":
+    elif parameter == "**":
         return None, _PK.VAR_KEYWORD
-    elif signature.endswith("="):
-        return signature[:-1].strip(), _PK.KEYWORD_ONLY
+    elif parameter.endswith("="):
+        return parameter[:-1].strip(), _PK.KEYWORD_ONLY
     else:
-        return signature, _PK.POSITIONAL_OR_KEYWORD
+        return parameter, _PK.POSITIONAL_OR_KEYWORD

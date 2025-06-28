@@ -54,7 +54,7 @@ class Graph():
 
         self._set_status(GraphStatus.RUN)
         topological_sorted = self._topological_sort(self.output_nodes)
-        self.context.construct_databox_sharing(topological_sorted)
+        self.context.construct_supply_demand(topological_sorted)
 
         for node in topological_sorted:
             args, kwargs = [], {}
@@ -95,15 +95,14 @@ class Graph():
                 adj_list[current] = []
 
             for in_slot in current.input_slots.values():
-                if in_slot.is_connected():
-                    source_node = in_slot.source_node
-                    stack.append(source_node)
+                for source in in_slot.source_list:
+                    stack.append(source.node)
                     in_degree[current] += 1
 
-                    if source_node not in adj_list:
-                        adj_list[source_node] = []
+                    if source.node not in adj_list:
+                        adj_list[source.node] = []
 
-                    adj_list[source_node].append(current)
+                    adj_list[source.node].append(current)
 
         return in_degree, adj_list
 

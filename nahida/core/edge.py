@@ -2,22 +2,10 @@ from collections.abc import Mapping
 
 from ._types import Node, InputSlot, NodeTopologyError
 
-__all__ = ["connect", "OutputAddress", "connect_from_address"]
+__all__ = ["connect", "AddrHandler", "connect_from_address"]
 
 
-def connect(
-        source_node: Node,
-        source_slot: str,
-        target_slot: InputSlot
-) -> None:
-    if target_slot.is_connected():
-        raise NodeTopologyError("Input slot is already connected")
-
-    target_slot.source_node = source_node
-    target_slot.source_slot = source_slot
-
-
-class OutputAddress:
+class AddrHandler:
     __slots__ = ("_node", "_slot")
 
     def __init__(self, node: Node, slot: str | None):
@@ -32,6 +20,8 @@ class OutputAddress:
         for name in self._node.output_slots.keys():
             self._slot = name
             break
+        else:
+            raise NodeTopologyError(f"No output slot for node {self._node}")
 
     def get_addr(self) -> tuple[Node, str]:
         if self._slot is None:
@@ -44,14 +34,14 @@ class OutputAddress:
 
 def connect_from_address(
         input_slots: Mapping[str, InputSlot],
-        addr_kwds: Mapping[str, OutputAddress]
+        addr_kwds: Mapping[str, AddrHandler | tuple[AddrHandler]]
 ) -> None:
-    for name, addr in addr_kwds.items():
+    for name, addrs in addr_kwds.items():
+        if not isinstance(addrs, (tuple, list)): addrs = (addrs,)
         if name in input_slots:
-            source_node, source_slot = addr.get_addr()
-            try:
-                connect(source_node, source_slot, input_slots[name])
-            except NodeTopologyError:
-                raise NodeTopologyError(f"Input slot {name} is already connected")
+            in_slot = input_slots[name]
+            for addr in addrs:
+                source_node, source_slot = addr.get_addr()
+                in_slot.connect(source_node, source_slot)
         else:
             raise NodeTopologyError(f"Input slot {name} does not exist")
