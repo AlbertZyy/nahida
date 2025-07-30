@@ -12,21 +12,6 @@ class SlotStatus(IntEnum):
     DISABLED = auto()
 
 
-@dataclass(eq=False, match_args=False, slots=True)
-class DataBox:
-    has_data: bool = field(default=False, init=False)
-    data: Any = field(default=None, init=False)
-
-    def put(self, data: Any) -> None:
-        self.has_data = True
-        self.data = data
-
-    def get(self) -> Any:
-        if not self.has_data:
-            raise ValueError("DataBox is empty.")
-        return self.data
-
-
 class SourceAddr(NamedTuple):
     """A named tuple containing the source node and slot name."""
     node: "Node"
@@ -111,10 +96,3 @@ class NodeTopologyError(Exception):
 class GraphStatusError(Exception):
     """Inappropriate status of graph."""
     pass
-
-
-class GraphStatus(IntEnum):
-    READY = auto()
-    RUN = auto()
-    DEBUG = auto()
-    STOP = auto()

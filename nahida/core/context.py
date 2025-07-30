@@ -1,11 +1,27 @@
 from typing import Any, TypeVar
 from collections.abc import Iterable
+from dataclasses import dataclass, field
 import inspect
 
-from ._types import DataBox, NodeIOError, Node
+from ._types import NodeIOError, Node
 
 _PK = inspect._ParameterKind  # type: ignore[reportPrivateUsage]
 _T = TypeVar("_T")
+
+
+@dataclass(eq=False, match_args=False, slots=True)
+class DataBox:
+    has_data: bool = field(default=False, init=False)
+    data: Any = field(default=None, init=False)
+
+    def put(self, data: Any) -> None:
+        self.has_data = True
+        self.data = data
+
+    def get(self) -> Any:
+        if not self.has_data:
+            raise ValueError("DataBox is empty.")
+        return self.data
 
 
 class NahidaCtxOperator:

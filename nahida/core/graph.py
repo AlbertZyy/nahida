@@ -2,15 +2,23 @@ from typing import Any
 from collections.abc import Callable, Iterable
 import time
 from collections import deque
+from enum import IntEnum
 
 from ._types import (
     Node, NodeExceptionData,
-    GraphStatus, GraphStatusError
+    GraphStatusError
 )
 from .node import inspected
 from .context import NahidaRunningContext
 
 __all__ = ["Graph", "WORLD_GRAPH"]
+
+
+class GraphStatus(IntEnum):
+    READY = 0
+    RUN   = 1
+    DEBUG = 2
+    STOP  = 3
 
 
 class Graph():

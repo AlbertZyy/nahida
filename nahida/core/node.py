@@ -20,14 +20,7 @@ class Node():
     _input_slots : OrderedDict[str, InputSlot]
     _output_slots : OrderedDict[str, OutputSlot]
 
-    def __init__(
-        self,
-        target=None,
-        inputs: tuple[str, ...] = (),
-        defaults: dict[str, Any] = {},
-        outputs: tuple[str, ...] = (),
-        variable: bool = False
-    ):
+    def __init__(self, target=None, variable: bool = False):
         r"""Initialize a compute node."""
         super().__init__()
         self._target = target
@@ -36,16 +29,6 @@ class Node():
         self._output_slots = OrderedDict()
         self._connection_hooks = OrderedDict()
         self._status_hooks = OrderedDict()
-
-        if target:
-            for in_arg in inputs:
-                if in_arg in defaults:
-                    self.register_input(in_arg, default=defaults[in_arg])
-                else:
-                    self.register_input(in_arg)
-
-            for out_arg in outputs:
-                self.register_output(out_arg)
 
     def register_input(
             self,
