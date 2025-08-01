@@ -1,11 +1,10 @@
 from typing import Any, TypeVar
 from collections.abc import Iterable
 from dataclasses import dataclass, field
-import inspect
 
 from ._types import NodeIOError, Node
+from ._types import ParamPassingKind as PPK
 
-_PK = inspect._ParameterKind  # type: ignore[reportPrivateUsage]
 _T = TypeVar("_T")
 
 
@@ -57,7 +56,7 @@ class NahidaCtxOperator:
     def receive_data(
         demand_ctx: dict[Any, list[DataBox]],
         node: Node,
-        positional_only: list,
+        positional: list,
         keyword: dict[str, Any]
     ) -> None:
         for name, input_slot in node.input_slots.items():
@@ -86,18 +85,18 @@ class NahidaCtxOperator:
                 continue
 
             param_kind = input_slot.param_kind
-            if param_kind == _PK.POSITIONAL_ONLY:
-                positional_only.append(data)
-            elif param_kind == _PK.VAR_POSITIONAL:
+            if param_kind == PPK.POSITIONAL:
+                positional.append(data)
+            elif param_kind == PPK.VAR_POSITIONAL:
                 assert isinstance(data, tuple)
-                positional_only.extend(data)
-            elif param_kind in (_PK.POSITIONAL_OR_KEYWORD, _PK.KEYWORD_ONLY):
+                positional.extend(data)
+            elif param_kind == PPK.KEYWORD:
                 param_name = input_slot.param_name
                 if param_name is None:
                     raise NodeIOError("Parameter name is expected if the parameter "
                                       "kind is not POSITIONAL_ONLY or variable length.")
                 keyword[param_name] = data
-            elif param_kind == _PK.VAR_KEYWORD:
+            elif param_kind == PPK.VAR_KEYWORD:
                 assert isinstance(data, dict)
                 keyword.update(data)
             else:
@@ -154,9 +153,9 @@ class NahidaRunningContext:
                 raise TypeError(f"Expected a Node instance, got {type(node)}")
             NahidaCtxOperator.construct_supply_demand(node, self.supply_ctx, self.demand_ctx)
 
-    def receive_data(self, node: Node, positional_only: list, keyword: dict[str, Any]) -> None:
+    def receive_data(self, node: Node, positional: list, keyword: dict[str, Any]) -> None:
         """Receive data from the context for a specific node, populating positional and keyword arguments."""
-        return NahidaCtxOperator.receive_data(self.demand_ctx, node, positional_only, keyword)
+        return NahidaCtxOperator.receive_data(self.demand_ctx, node, positional, keyword)
 
     def send_data(self, node: Node, results: Any | tuple[Any, ...]) -> None:
         """Send data from a node to the context, storing it in the appropriate data boxes."""

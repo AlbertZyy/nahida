@@ -6,7 +6,8 @@ from inspect import _ParameterKind as _PK
 from functools import partial
 
 from . import edge as _E
-from ._types import NodeTopologyError, InputSlot, OutputSlot
+from ._types import InputSlot, OutputSlot
+from ._types import ParamPassingKind as PPK
 
 __all__ = [
     "Node",
@@ -30,11 +31,14 @@ class Node():
         self._connection_hooks = OrderedDict()
         self._status_hooks = OrderedDict()
 
+    def __bool__(self) -> bool:
+        return True
+
     def register_input(
             self,
             name: str,
             variable: bool = False,
-            parameter: str | _PK | None = None,
+            parameter: str | int | None = None,
             **kwargs
     ):
         """Add an input slot to the node."""
@@ -53,7 +57,7 @@ class Node():
         elif hasattr(self, name) and name not in self._input_slots:
             raise KeyError(f"attribute '{name}' already exists")
         else:
-            if isinstance(parameter, _PK):
+            if isinstance(parameter, int):
                 param_name, param_kind = name, parameter
             else:
                 if parameter is None:
@@ -93,17 +97,17 @@ class Node():
                 input_slot = self._input_slots[name]
                 input_slot.param_kind = kind
 
-    def get_input(self, name: str):
-        """Return the input slot given by `name`. Raises NodeTopologyError if not exists."""
-        if name not in self._input_slots:
-            raise NodeTopologyError(f"no input named {name}")
-        return self._input_slots[name]
+    # def get_input(self, name: str):
+    #     """Return the input slot given by `name`. Raises NodeTopologyError if not exists."""
+    #     if name not in self._input_slots:
+    #         raise NodeTopologyError(f"no input named {name}")
+    #     return self._input_slots[name]
 
-    def get_output(self, name: str):
-        """Return the output slot given by `name`. Raises NodeTopologyError if not exists."""
-        if name not in self._output_slots:
-            raise NodeTopologyError(f"no output named {name}")
-        return self._output_slots[name]
+    # def get_output(self, name: str):
+    #     """Return the output slot given by `name`. Raises NodeTopologyError if not exists."""
+    #     if name not in self._output_slots:
+    #         raise NodeTopologyError(f"no output named {name}")
+    #     return self._output_slots[name]
 
     def dump_key(self, slot: str):
         return (self, slot)
@@ -133,31 +137,6 @@ class Node():
         return _E.AddrHandler(self, None)
 
 
-    # def __rshift__(self, other):
-    #     if isinstance(other, Node): # *Node >> Node -> Node
-    #         self.OUT.sent(other.IN)
-    #         return other
-    #     return self.OUT.sent(other) # *Node >> port -> *Node.OUT
-
-    # def __lshift__(self, other):
-    #     if isinstance(other, Node): # *Node << Node -> Node
-    #         self.IN.recv(other.OUT)
-    #         return other
-    #     self.IN.recv(other) # *Node << port -> None
-    #     return None
-
-    # def __rlshift__(self, other):
-    #     self.OUT.sent(other) # port << *Node -> *Node
-    #     return self
-
-    # def __rrshift__(self, other):
-    #     self.IN.recv(other) # port >> *Node -> *Node
-    #     return self
-
-# @overload
-# def inspected(*, outputs: str | tuple[str, ...] = "out") -> Callable[[Callable], Node]: ...
-# @overload
-# def inspected(target: Callable, /, inspector=None, outputs: str | tuple[str, ...] = "out") -> Node: ...
 def inspected(
         target: Callable | None,
         /,
@@ -288,26 +267,23 @@ class OutputNode(Node):
         return self._value
 
 
-def parse_signature(parameter: str) -> tuple[str | None, _PK]:
+def parse_signature(parameter: str) -> tuple[str | None, PPK]:
     """Get the name and kind of the parameter used by the node to call the function.
 
     Args:
         parameter (str): The parameter of a parameter.
-            - `'/'` - positional only
+            - `'/'` - positional
             - `'*'` - variable positional
-            - `'{name}'` - positional or keyword
-            - `'{name}='` - keyword only
+            - `'{name}'` - keyword
             - `'**'` - variable keyword
     """
     parameter = parameter.strip()
 
     if parameter == "/":
-        return None, _PK.POSITIONAL_ONLY
+        return None, PPK.POSITIONAL
     elif parameter == "*":
-        return None, _PK.VAR_POSITIONAL
+        return None, PPK.VAR_POSITIONAL
     elif parameter == "**":
-        return None, _PK.VAR_KEYWORD
-    elif parameter.endswith("="):
-        return parameter[:-1].strip(), _PK.KEYWORD_ONLY
+        return None, PPK.VAR_KEYWORD
     else:
-        return parameter, _PK.POSITIONAL_OR_KEYWORD
+        return parameter, PPK.KEYWORD

@@ -6,6 +6,13 @@ from dataclasses import dataclass, field
 from enum import IntEnum, auto
 
 
+class ParamPassingKind(IntEnum):
+    POSITIONAL     = 0
+    KEYWORD        = 1
+    VAR_POSITIONAL = 2
+    VAR_KEYWORD    = 3
+
+
 class SlotStatus(IntEnum):
     ACTIVE = auto()
     BLOCKED = auto()
@@ -34,15 +41,15 @@ class Slot():
 
 @dataclass(slots=True)
 class InputSlot(Slot):
-    has_default: bool = False
-    default: Any = None
-    param_name: str | None = None
-    param_kind: _ParameterKind = _ParameterKind.POSITIONAL_OR_KEYWORD
-    variable: bool = False
-    source_list: list[SourceAddr] = field(default_factory=list, init=False, compare=False)
+    has_default : bool             = False
+    default     : Any              = None
+    param_name  : str | None       = None
+    param_kind  : int              = 1
+    variable    : bool             = False
+    source_list : list[SourceAddr] = field(default_factory=list, init=False, compare=False)
 
     def __post_init__(self) -> None:
-        if self.param_kind == _ParameterKind.VAR_KEYWORD and self.variable:
+        if self.param_kind == ParamPassingKind.VAR_KEYWORD and self.variable:
             raise TypeError("data from variable slots are not allowed to be "
                             "variable keyword arguments")
 
