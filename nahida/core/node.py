@@ -16,6 +16,14 @@ __all__ = [
     "Sequential"
 ]
 
+PK_MAPPING = {
+    _PK.POSITIONAL_ONLY       : PPK.POSITIONAL,
+    _PK.KEYWORD_ONLY          : PPK.KEYWORD,
+    _PK.POSITIONAL_OR_KEYWORD : PPK.KEYWORD,
+    _PK.VAR_POSITIONAL        : PPK.VAR_POSITIONAL,
+    _PK.VAR_KEYWORD           : PPK.VAR_KEYWORD
+}
+
 
 class Node():
     _input_slots : OrderedDict[str, InputSlot]
@@ -91,27 +99,6 @@ class Node():
         else:
             self._output_slots[name] = OutputSlot()
 
-    def set_param_kinds(self, kinds: dict[str, _PK]):
-        for name, kind in kinds.items():
-            if name in self._input_slots:
-                input_slot = self._input_slots[name]
-                input_slot.param_kind = kind
-
-    # def get_input(self, name: str):
-    #     """Return the input slot given by `name`. Raises NodeTopologyError if not exists."""
-    #     if name not in self._input_slots:
-    #         raise NodeTopologyError(f"no input named {name}")
-    #     return self._input_slots[name]
-
-    # def get_output(self, name: str):
-    #     """Return the output slot given by `name`. Raises NodeTopologyError if not exists."""
-    #     if name not in self._output_slots:
-    #         raise NodeTopologyError(f"no output named {name}")
-    #     return self._output_slots[name]
-
-    def dump_key(self, slot: str):
-        return (self, slot)
-
     @property
     def input_slots(self):
         return self._input_slots
@@ -119,10 +106,6 @@ class Node():
     @property
     def output_slots(self):
         return self._output_slots
-
-    @property
-    def is_variable(self):
-        return self._variable
 
     def run(self, *args, **kwargs):
         if self._target:
@@ -168,8 +151,7 @@ def inspected(
     node = Node(target)
 
     for name, param in sig.parameters.items():
-        param.annotation
-        kwargs = {"name": name, "parameter": param.kind}
+        kwargs = {"name": name, "parameter": PK_MAPPING[param.kind]}
 
         if var_slot and param.kind == _PK.VAR_POSITIONAL:
             kwargs["variable"] = True
