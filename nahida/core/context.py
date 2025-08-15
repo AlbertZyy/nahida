@@ -2,7 +2,7 @@ from typing import Any, TypeVar
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 
-from ._types import NodeIOError, Node
+from ._types import NodeIOError, Node, NodeGroup, Slot, TransSlot
 from ._types import ParamPassingKind as PPK
 
 _T = TypeVar("_T")
@@ -25,36 +25,39 @@ class DataBox:
 
 class NahidaCtxOperator:
     @staticmethod
-    def construct_supply_demand(
-        node: Node,
-        supply_ctx: dict[_T, DataBox],
-        demand_ctx: dict[_T, list[DataBox]]
-    ) -> None:
-        for name, output_slot in node.output_slots.items():
-            if output_slot.is_active():
-                context_key = node.dump_key(name)
-                data_box = DataBox()
-                supply_ctx[context_key] = data_box
+    def create_box(supply_ctx: dict[int, DataBox], slot: Slot):
+        """Create databox for a slot in `supply_ctx`."""
+        if slot.is_active():
+            supply_ctx[id(slot)] = DataBox()
 
-        for name, input_slot in node.input_slots.items():
-            if not input_slot.is_active(): continue
-            for source in input_slot.source_list:
-                source_key = source.node.dump_key(source.slot)
+    @staticmethod
+    def share_box(
+        supply_ctx: dict[int, DataBox],
+        demand_ctx: dict[int, list[DataBox]],
+        sources: Iterable[tuple[Node, str]],
+        slot: Slot
+    ):
+        """Share databoxes to a slot from its sources, from `supply_ctx` to `demand_ctx`."""
+        if not slot.is_active():
+            return
 
-                if source_key in supply_ctx:
-                    data_box = supply_ctx[source_key]
-                    context_key = node.dump_key(name)
+        for src_node, src_slot in sources:
+            source_key = id(src_node.output_slots[src_slot])
 
-                    if context_key not in demand_ctx:
-                        demand_ctx[context_key] = []
+            if source_key not in supply_ctx:
+                raise NodeIOError("Input data box is not found.")
 
-                    demand_ctx[context_key].append(data_box)
-                else:
-                    raise NodeIOError("Input data box is not found.")
+            data_box = supply_ctx[source_key]
+            context_key = id(slot)
+
+            if context_key not in demand_ctx:
+                demand_ctx[context_key] = []
+
+            demand_ctx[context_key].append(data_box)
 
     @staticmethod
     def receive_data(
-        demand_ctx: dict[Any, list[DataBox]],
+        demand_ctx: dict[int, list[DataBox]],
         node: Node,
         positional: list,
         keyword: dict[str, Any]
@@ -64,11 +67,11 @@ class NahidaCtxOperator:
                 continue
 
             if input_slot.is_connected():
-                databox_list = demand_ctx.pop(node.dump_key(name), None)
+                databox_list = demand_ctx.pop(id(input_slot), None)
                 if databox_list is None:
                     raise NodeIOError(f"No databox found for the input '{repr(node)}.{name}', "
                                       "construct the databox sharing first.")
-                if input_slot.variable:
+                if getattr(input_slot, "variable", False):
                     data = tuple(databox.get() for databox in databox_list)
                 else:
                     assert len(databox_list) == 1
@@ -104,7 +107,7 @@ class NahidaCtxOperator:
 
     @staticmethod
     def send_data(
-        supply_ctx: dict[Any, DataBox],
+        supply_ctx: dict[int, DataBox],
         node: Node,
         results: Any | tuple[Any, ...]
     ) -> None:
@@ -124,7 +127,7 @@ class NahidaCtxOperator:
             )
         for (name, output_slot), data in zip(available_slots.items(), results):
             if output_slot.is_active():
-                databox = supply_ctx.pop(node.dump_key(name), None)
+                databox = supply_ctx.pop(id(output_slot), None)
                 if databox is None:
                     raise NodeIOError(
                         f"No databox found for the output slot '{repr(node)}.{name}', "
@@ -139,19 +142,34 @@ class NahidaCtxOperator:
 
 
 class NahidaRunningContext:
-    supply_ctx: dict[Any, DataBox]
-    demand_ctx: dict[Any, list[DataBox]]
+    supply_ctx: dict[int, DataBox]
+    demand_ctx: dict[int, list[DataBox]]
 
     def __init__(self):
         self.supply_ctx = {}
         self.demand_ctx = {}
 
-    def construct_supply_demand(self, nodes: Iterable[Node]) -> None:
+    def construct_supply_demand(self, nodes: Iterable[Node], group: NodeGroup | None = None) -> None:
         """Construct the data box sharing context for a list of nodes."""
         for node in nodes:
             if not isinstance(node, Node):
                 raise TypeError(f"Expected a Node instance, got {type(node)}")
-            NahidaCtxOperator.construct_supply_demand(node, self.supply_ctx, self.demand_ctx)
+
+            for output_slot in node.output_slots.values():
+                NahidaCtxOperator.create_box(self.supply_ctx, output_slot)
+
+            for input_slot in node.input_slots.values():
+                NahidaCtxOperator.share_box(
+                    self.supply_ctx, self.demand_ctx,
+                    input_slot.source_list, input_slot
+                )
+
+        if group:
+            for output_slot in group.output_slots.values():
+                NahidaCtxOperator.share_box(
+                    self.supply_ctx, self.demand_ctx,
+                    output_slot.source_list, output_slot
+                )
 
     def receive_data(self, node: Node, positional: list, keyword: dict[str, Any]) -> None:
         """Receive data from the context for a specific node, populating positional and keyword arguments."""
@@ -165,3 +183,22 @@ class NahidaRunningContext:
         """Clear the context, removing all data boxes."""
         self.supply_ctx.clear()
         self.demand_ctx.clear()
+
+    def get(self, group: NodeGroup) -> dict[str, Any]:
+        results = {}
+
+        for name, outslot in group.output_slots.items():
+            context_key = id(outslot)
+
+            if context_key in self.demand_ctx:
+                databox_list = self.demand_ctx.pop(context_key)
+                data = tuple(databox.get() for databox in databox_list)
+                # NOTE: Can this be variable?
+                assert len(data) == 1
+                results[name] = data[0]
+            elif outslot.has_default:
+                results[name] = outslot.default
+            else:
+                raise NodeIOError
+
+        return results

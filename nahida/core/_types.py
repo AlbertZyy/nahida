@@ -27,7 +27,11 @@ class SourceAddr(NamedTuple):
 
 @dataclass(slots=True)
 class Slot():
+    """Slot with status"""
     status: SlotStatus = SlotStatus.ACTIVE
+
+    def __hash__(self) -> int:
+        return id(self)
 
     def is_active(self) -> bool:
         return self.status == SlotStatus.ACTIVE
@@ -40,21 +44,31 @@ class Slot():
 
 
 @dataclass(slots=True)
-class InputSlot(Slot):
+class TransSlot(Slot):
     has_default : bool             = False
     default     : Any              = None
+    source_list : list[SourceAddr] = field(default_factory=list, init=False, compare=False)
+
+    def is_connected(self) -> bool:
+        return len(self.source_list) > 0
+
+    def connect(self, source: "Node", slot: str):
+        if not self.is_connected():
+            self.source_list.append(SourceAddr(source, slot))
+        else:
+            raise NodeTopologyError("multiple connections to non-variable input")
+
+
+@dataclass(slots=True)
+class InputSlot(TransSlot):
+    variable    : bool             = False
     param_name  : str | None       = None
     param_kind  : int              = 1
-    variable    : bool             = False
-    source_list : list[SourceAddr] = field(default_factory=list, init=False, compare=False)
 
     def __post_init__(self) -> None:
         if self.param_kind == ParamPassingKind.VAR_KEYWORD and self.variable:
             raise TypeError("data from variable slots are not allowed to be "
                             "variable keyword arguments")
-
-    def is_connected(self) -> bool:
-        return len(self.source_list) > 0
 
     def connect(self, source: "Node", slot: str):
         if self.variable or not self.is_connected():
@@ -63,21 +77,26 @@ class InputSlot(Slot):
             raise NodeTopologyError("multiple connections to non-variable input")
 
 
-@dataclass(slots=True)
-class OutputSlot(Slot):
-    pass
+OutputSlot = Slot
 
 
 @runtime_checkable
 class Node(Protocol):
+    """Protocol for computational nodes"""
     @property
     def input_slots(self) -> Mapping[str, InputSlot]: ...
     @property
     def output_slots(self) -> Mapping[str, OutputSlot]: ...
-    @property
-    def is_variable(self) -> bool: ...
     def run(self, *args, **kwargs) -> Any: ...
-    def dump_key(self, slot: str) -> Any: ...
+
+
+class NodeGroup(Protocol):
+    """Protocol for node groups"""
+    @property
+    def input_slots(self) -> Mapping[str, InputSlot]: ...
+    @property
+    def output_slots(self) -> Mapping[str, TransSlot]: ...
+    def run(self, *args, **kwargs) -> Any: ...
 
 
 @dataclass(frozen=True, slots=True)
