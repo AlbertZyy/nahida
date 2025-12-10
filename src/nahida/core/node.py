@@ -1,24 +1,24 @@
 
 __all__ = [
     "PortId",
-    "NodeExcutionReport",
+    "NodeExecFeedback",
     "InputDataNotFoundError",
     "InputMissingError",
     "NodeExceptionError",
     "OutputLengthMismatchError",
     "DataAlreadyExistError",
     "Node",
-    "ComputeNode",
+    "Compute",
     "Branch",
-    "FiniteLoop"
+    "Repeat"
 ]
 
 import inspect
 from inspect import _ParameterKind as PPK
-from typing import Any
+from typing import Any, overload
 from abc import abstractmethod, ABCMeta
 from collections.abc import Callable, Iterable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 
 type PortId = tuple[int, int]
@@ -26,9 +26,9 @@ type PortId = tuple[int, int]
 
 
 @dataclass(slots=True, frozen=True)
-class NodeExcutionReport[N]:
-    recruit: list[N]
-    deactivate: bool
+class NodeExecFeedback[N]:
+    recruit: list[N] = field(default_factory=list)
+    deactivate: bool = True
 
 
 class InputDataNotFoundError(Exception):
@@ -63,13 +63,13 @@ class Node(metaclass=ABCMeta):
     def run(
         self,
         context: dict[PortId, Any]
-    ) -> NodeExcutionReport: ...
+    ) -> NodeExecFeedback: ...
     ```"""
     @abstractmethod
     def run(
         self,
         context: dict[PortId, Any]
-    ) -> NodeExcutionReport["Node"]: ...
+    ) -> NodeExecFeedback["Node"]: ...
 
 
 def get_inputs(func: Callable) -> Iterable[tuple[str, Any, bool]]:
@@ -87,46 +87,83 @@ def get_inputs(func: Callable) -> Iterable[tuple[str, Any, bool]]:
 class ContextOps:
     values: dict[str, Any]
     connects: dict[str, PortId]
-    outputs: list[str]
 
     def __init__(self):
         self.values = {}
         self.connects = {}
-        self.outputs = []
 
-    def pull(self, context: dict[PortId, Any], name: str) -> tuple[Any, bool]:
+    def __call__(self, **kwargs: PortId | Any):
+        for name, value in kwargs.items():
+            if isinstance(value, tuple):
+                self.connects[name] = value
+            else:
+                self.values[name] = value
+
+    def read_value(self, context: dict[PortId, Any], name: str) -> tuple[Any, bool]:
         """Get value for an input from the context."""
         if name in self.connects:
             pack_id = self.connects[name]
-            if pack_id not in context:
-                raise InputDataNotFoundError(
-                    f"Value for input {name!r} of {self!r} not found "
-                    "in the context. Make sure the compute order is correct."
-                )
-            return context[pack_id], True
-        elif name in self.values:
-            return self.values[name], True
-        else:
-            return None, False
-
-    def push(self, context: dict[PortId, Any], values: tuple) -> None:
-        """Put values into the context."""
-        for i, (name, val) in enumerate(zip(self.outputs, values)):
-            pack_id = (id(self), i)
             if pack_id in context:
-                raise DataAlreadyExistError(
-                    f"Output {name!r} of {self!r} already exists in the context"
-                )
+                return context[pack_id], True
+
+        if name in self.values:
+            return self.values[name], True
+
+        return None, False
+
+    def write_value(self, context: dict[PortId, Any], values: tuple) -> None:
+        """Put values into the context."""
+        for i, val in enumerate(values):
+            pack_id = (id(self), i)
             context[pack_id] = val
 
 
-class ComputeNode(ContextOps):
-    """Computational Node object."""
-    _target: Callable
+class _ConnectableMixin:
+    outputs: list[str]
+
+    def __init__(self, outputs: list[str]):
+        self.outputs = outputs
+
+    def __len__(self) -> int:
+        return len(self.outputs)
+
+    def __getitem__(self, key: str | int) -> PortId:
+        if isinstance(key, str):
+            try:
+                index = self.outputs.index(key)
+            except ValueError as e:
+                raise ValueError(f"No output named {key!r} in {self!r}") from e
+        elif isinstance(key, int):
+            if key >= len(self.outputs):
+                raise IndexError(
+                    f"Output index {key} out of range for {self!r}"
+                )
+            index = key
+        else:
+            raise TypeError(f"Invalid key type {type(key)}")
+
+        return (id(self), index)
+
+
+class _RouterMixin:
     downstreams: list[Node]
 
-    def __init__(self, target: Callable, /):
-        super().__init__()
+    def __init__(self, downstream: list[Node]):
+        self.downstreams = downstream
+
+    def __rshift__(self, other: Node) -> Node:
+        self.downstreams.append(other)
+        return other
+
+
+class Compute(_RouterMixin, _ConnectableMixin, ContextOps):
+    """Computational Node object."""
+    _target: Callable
+
+    def __init__(self, target: Callable, /, outputs: list[str]):
+        super(_ConnectableMixin, self).__init__()
+        super(_RouterMixin, self).__init__(outputs)
+        super(Compute, self).__init__([])
         sig = inspect.signature(self._target)
 
         for param in sig.parameters.values():
@@ -134,26 +171,16 @@ class ComputeNode(ContextOps):
                 raise TypeError("Positional-only parameters are not supported")
 
         self._target = target
-        self.downstreams = []
 
     def __repr__(self) -> str:
         return f"<Node {self._target.__name__} at {hex(id(self))}>"
-
-    def __getitem__(self, name: str) -> PortId:
-        try:
-            return (id(self), self.outputs.index(name))
-        except ValueError as e:
-            raise ValueError(f"No output named {name} in {self!r}") from e
-
-    def __call__(self, **kwargs: PortId):
-        self.connects.update(kwargs)
 
     def run(self, context: dict[PortId, Any] = {}):
         """Execute the node"""
         input_kwargs = {}
 
         for param, _, has_default in get_inputs(self._target):
-            val, status = self.pull(context, param)
+            val, status = self.read_value(context, param)
             if status:
                 input_kwargs[param] = val
                 continue
@@ -177,55 +204,45 @@ class ComputeNode(ContextOps):
                 f"values, but expected {len(self.outputs)}"
             )
 
-        self.push(context, result)
+        self.write_value(context, result)
 
-        return NodeExcutionReport(
+        return NodeExecFeedback(
             recruit=self.downstreams,
             deactivate=True
         )
 
-Node.register(ComputeNode)
+Node.register(Compute)
 
 
-class Branch:
-    condition_port: PortId | None
-    value: bool
+class Branch(_ConnectableMixin, ContextOps):
     downstreams_true: list[Node]
     downstreams_false: list[Node]
 
-    def __init__(self, condition: PortId | bool = False):
-        if isinstance(condition, tuple):
-            self.condition_port = condition
-            self.value = False
-        else:
-            self.condition_port = None
-            self.value = bool(condition)
-
+    def __init__(self, condition: bool | PortId = False, /):
+        super(_ConnectableMixin, self).__init__()
+        super(Branch, self).__init__([])
+        self(condition=condition)
         self.downstreams_false = []
         self.downstreams_true = []
 
     @property
-    def true(self): ...
+    def true(self):
+        return _RouterMixin(self.downstreams_true)
 
     @property
-    def false(self): ...
+    def false(self):
+        return _RouterMixin(self.downstreams_false)
 
     def run(self, context: dict[PortId, Any] = {}):
-        if self.condition_port is None:
-            val = self.value
-        else:
-            if self.condition_port not in context:
-                raise InputDataNotFoundError
+        val, status = self.read_value(context, "condition")
 
-            val = bool(context[self.condition])
-
-        if val:
-            return NodeExcutionReport(
+        if bool(val) and status:
+            return NodeExecFeedback(
                 recruit=self.downstreams_true,
                 deactivate=True
             )
         else:
-            return NodeExcutionReport(
+            return NodeExecFeedback(
                 recruit=self.downstreams_false,
                 deactivate=True
             )
@@ -233,25 +250,50 @@ class Branch:
 Node.register(Branch)
 
 
-class FiniteLoop:
-    iters: int
-    start: int
-    downstreams: list[Node]
+class Repeat(_RouterMixin, _ConnectableMixin, ContextOps):
+    @overload
+    def __init__(self, stop: int | PortId = 1, /): ...
+    @overload
+    def __init__(self, start: int | PortId, stop: int | PortId, step: int | PortId = 1, /): ...
+    def __init__(self, *args):
+        if len(args) == 0:
+            start, stop, step = 0, 1, 1
+        elif len(args) == 1:
+            start, stop, step = 0, args[0], 1
+        elif len(args) == 2:
+            start, stop, step = args[0], args[1], 1
+        elif len(args) == 3:
+            start, stop, step = args
+        else:
+            raise TypeError("Invalid arguments")
 
-    def __init__(self, iters: PortId | int = 0, start: int = 0):
-        self.iters = iters
-        self.downstreams = []
+        super(_ConnectableMixin, self).__init__()
+        super(_RouterMixin, self).__init__(["current"])
+        super(Repeat, self).__init__([])
+        self(start=start, stop=stop, step=step)
+        self.iterator = None
 
     def run(self, context: dict[PortId, Any] = {}):
-        if self.iters > 1:
-            return NodeExcutionReport(
-                recruit=self.downstreams,
-                deactivate=False
-            )
-        else:
-            return NodeExcutionReport(
-                recruit=self.downstreams,
-                deactivate=True
-            )
+        if self.iterator is None:
+            start = self.read_value(context, "start")[0]
+            stop = self.read_value(context, "stop")[0]
+            step = self.read_value(context, "step")[0]
+            self.iterator = iter(range(start, stop, step))
+            current = next(self.iterator)
+        # NOTE: Advance the iterator by one step so that when the next step is
+        # about to trigger StopIteration, the loop exits immediately.
+        # This avoids triggering StopIteration at the current step and not
+        # recruiting any downstream nodes.
+        try:
+            next_val = next(self.iterator)
+        except StopIteration:
+            self.iterator = None
 
-Node.register(FiniteLoop)
+        self.write_value(context, (current,))
+        current = next_val
+        return NodeExecFeedback(
+            recruit=self.downstreams,
+            deactivate=self.iterator is None
+        )
+
+Node.register(Repeat)
