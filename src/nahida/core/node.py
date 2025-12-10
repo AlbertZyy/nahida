@@ -10,7 +10,9 @@ __all__ = [
     "Node",
     "Compute",
     "Branch",
-    "Repeat"
+    "Repeat",
+    "Break",
+    "Join"
 ]
 
 import inspect
@@ -20,16 +22,32 @@ from abc import abstractmethod, ABCMeta
 from collections.abc import Callable, Iterable
 from collections import namedtuple
 from dataclasses import dataclass, field
+from enum import StrEnum
 
 
 PortId = namedtuple("PortId", ["node_id", "index"])
 """Port identifier."""
 
 
+class FlowCtrl(StrEnum):
+    """Workflow control instruction after execution."""
+
+    NONE = "none"
+    """Do nothing and be poped from the stack top."""
+
+    REPEAT = "repeat"
+    """Require to be re-pushed into the computation stack."""
+
+    BREAK = "break"
+    """Require to pop the nearest re-pushed node directly (no execution)
+    when the next time it is on the top."""
+
+
 @dataclass(slots=True, frozen=True)
 class NodeExecFeedback[N]:
+    """Feedback from node execution."""
     recruit: list[N] = field(default_factory=list)
-    deactivate: bool = True
+    control: FlowCtrl = FlowCtrl.NONE
 
 
 class InputDataNotFoundError(Exception):
@@ -143,7 +161,7 @@ class _ConnectableMixin:
         else:
             raise TypeError(f"Invalid key type {type(key)}")
 
-        return (id(self), index)
+        return PortId(id(self), index)
 
 
 class _RouterMixin:
@@ -152,7 +170,7 @@ class _RouterMixin:
     def __init__(self, downstream: list[Node]):
         self.downstreams = downstream
 
-    def __rshift__(self, other: Node) -> Node:
+    def __rshift__[N: Node](self, other: N) -> N:
         self.downstreams.append(other)
         return other
 
@@ -207,15 +225,13 @@ class Compute(_RouterMixin, _ConnectableMixin, ContextOps):
 
         self.write_value(context, result)
 
-        return NodeExecFeedback(
-            recruit=self.downstreams,
-            deactivate=True
-        )
+        return NodeExecFeedback(recruit=self.downstreams)
 
 Node.register(Compute)
 
 
 class Branch(_ConnectableMixin, ContextOps):
+    """Branch the execution based on a condition."""
     downstreams_true: list[Node]
     downstreams_false: list[Node]
 
@@ -238,20 +254,15 @@ class Branch(_ConnectableMixin, ContextOps):
         val, status = self.read_value(context, "condition")
 
         if bool(val) and status:
-            return NodeExecFeedback(
-                recruit=self.downstreams_true,
-                deactivate=True
-            )
+            return NodeExecFeedback(recruit=self.downstreams_true)
         else:
-            return NodeExecFeedback(
-                recruit=self.downstreams_false,
-                deactivate=True
-            )
+            return NodeExecFeedback(recruit=self.downstreams_false)
 
 Node.register(Branch)
 
 
 class Repeat(_RouterMixin, _ConnectableMixin, ContextOps):
+    """Repeat the execution for multiple times."""
     @overload
     def __init__(self, stop: int | PortId = 1, /): ...
     @overload
@@ -294,7 +305,41 @@ class Repeat(_RouterMixin, _ConnectableMixin, ContextOps):
         current = next_val
         return NodeExecFeedback(
             recruit=self.downstreams,
-            deactivate=self.iterator is None
+            control=FlowCtrl.NONE if (self.iterator is None) else FlowCtrl.REPEAT
         )
 
 Node.register(Repeat)
+
+
+class Break:
+    """Break the repeat loop."""
+    def run(self, context: dict[PortId, Any] = {}):
+        return NodeExecFeedback(control=FlowCtrl.BREAK)
+
+Node.register(Break)
+
+
+class Join(_RouterMixin):
+    """Block the execution until all receivers are triggered."""
+    def __init__(self, num: int = 2):
+        super().__init__([])
+        self.receivers = tuple(Join.Receiver(self, i) for i in range(num))
+        self.flags = [False] * num
+
+    def run(self, context: dict[PortId, Any] = {}) -> NodeExecFeedback:
+        if all(self.flags):
+            self.flags = [False] * len(self.receivers)
+            return NodeExecFeedback(recruit=self.downstreams)
+        else:
+            return NodeExecFeedback()
+
+    class Receiver:
+        def __init__(self, parent: "Join", index: int):
+            self.parent = parent
+            self.index = index
+
+        def run(self, context: dict[PortId, Any] = {}):
+            self.parent.flags[self.index] = True
+            return NodeExecFeedback(recruit=[self.parent])
+
+Node.register(Join)
