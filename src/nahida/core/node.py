@@ -18,10 +18,11 @@ from inspect import _ParameterKind as PPK
 from typing import Any, overload
 from abc import abstractmethod, ABCMeta
 from collections.abc import Callable, Iterable
+from collections import namedtuple
 from dataclasses import dataclass, field
 
 
-type PortId = tuple[int, int]
+PortId = namedtuple("PortId", ["node_id", "index"])
 """Port identifier."""
 
 
@@ -77,11 +78,11 @@ def get_inputs(func: Callable) -> Iterable[tuple[str, Any, bool]]:
     sig = inspect.signature(func)
 
     for name, param in sig.parameters.items():
-        if param.kind in (PPK.POSITIONAL_ONLY, PPK.VAR_POSITIONAL):
-            raise TypeError("Positional-only parameters are not supported")
         if param.kind in (PPK.POSITIONAL_OR_KEYWORD, PPK.KEYWORD_ONLY):
             has_default = param.default is not PPK.empty
             yield name, param.default, has_default
+        if param.kind in (PPK.POSITIONAL_ONLY, PPK.VAR_POSITIONAL):
+            raise TypeError("Positional-only parameters are not supported")
 
 
 class ContextOps:
@@ -94,7 +95,7 @@ class ContextOps:
 
     def __call__(self, **kwargs: PortId | Any):
         for name, value in kwargs.items():
-            if isinstance(value, tuple):
+            if isinstance(value, PortId):
                 self.connects[name] = value
             else:
                 self.values[name] = value
@@ -114,7 +115,7 @@ class ContextOps:
     def write_value(self, context: dict[PortId, Any], values: tuple) -> None:
         """Put values into the context."""
         for i, val in enumerate(values):
-            pack_id = (id(self), i)
+            pack_id = PortId(id(self), i)
             context[pack_id] = val
 
 
