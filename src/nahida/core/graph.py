@@ -1,244 +1,71 @@
-from typing import Any, Literal
-from collections.abc import Callable, Iterable
-from collections import deque, OrderedDict
-import time
-
-from . import edge as _E
-from ._types import Node, NodeExceptionData, InputSlot, TransSlot
-from ._types import ParamPassingKind as PPK
-from .context import NahidaRunningContext
 
 __all__ = ["Graph"]
 
-
-def collect_relevant_nodes(nodes: Iterable[Node]):
-    """Collect all relevant upstream nodes from output nodes."""
-    stack = list(nodes)
-    visited   : set[Node]              = set()
-    in_degree : dict[Node, int]        = {}
-    adj_list  : dict[Node, list[Node]] = {}
-
-    while stack:
-        current = stack.pop()
-
-        if current in visited:
-            continue
-
-        visited.add(current)
-        in_degree[current] = 0
-
-        if current not in adj_list:
-            adj_list[current] = []
-
-        for in_slot in current.input_slots.values():
-            for source in in_slot.source_list:
-                stack.append(source.node)
-                in_degree[current] += 1
-
-                if source.node not in adj_list:
-                    adj_list[source.node] = []
-
-                adj_list[source.node].append(current)
-
-    return in_degree, adj_list
-
-
-def topological_sort(nodes: Iterable[Node]) -> list[Node]:
-    in_degree, adj_list = collect_relevant_nodes(nodes)
-
-    queue = deque(node for node, degree in in_degree.items() if degree == 0)
-    sorted_nodes = []
-
-    while queue:
-        current = queue.popleft()
-        sorted_nodes.append(current)
-        for neighbor in adj_list[current]:
-            in_degree[neighbor] -= 1
-            if in_degree[neighbor] == 0:
-                queue.append(neighbor)
-
-    if len(sorted_nodes) != len(adj_list):
-        raise ValueError("There is a circular dependency in the computation graph.")
-
-    return sorted_nodes
+from typing import Any
+from .node import Node, PortId, FlowCtrl as _FC
 
 
 class Graph:
-    _input_slots : OrderedDict[str, InputSlot]
-    _output_slots : OrderedDict[str, TransSlot]
-    _interior: bool
-    context: NahidaRunningContext
-    error_listeners: list[Callable[[NodeExceptionData], Any]]
+    def __init__(self, starters: list[Node]):
+        self.connects: dict[str, PortId] = {}
+        self.exec_stack: list[Node] = starters.copy()
+        self.loop_stack: list[Node] = []
 
-    def __init__(self):
-        self._input_slots = OrderedDict()
-        self._output_slots = OrderedDict()
-        self._interior = False
-        self.context = NahidaRunningContext()
-        self.error_listeners = []
-        # A fake node returning the input data of the graph,
-        # because `topological_sort` needs nodes with 0 in-degree as start points.
-        self._input_node = GraphInputNode(self, OrderedDict())
+    def __getitem__(self, item: str):
+        return PortId(self, item)
 
-    def __bool__(self) -> bool:
-        return True
+    def __call__(self, **kwargs: PortId):
+        for name, value in kwargs.items():
+            if isinstance(value, PortId):
+                self.connects[name] = value
+            else:
+                raise TypeError(
+                    f"Graph output {name!r} must connect to a PortId, "
+                    f"got {type(value).__name__!r}."
+                )
 
-    def register_input(
-            self,
-            name: str,
-            variable: bool = False,
-            parameter: str | None = None,
-            **kwargs
-    ):
-        """Add an input slot to the node."""
-        if "_input_slots" not in self.__dict__:
-            raise AttributeError(
-                "cannot assign inputs before Node.__init__() call"
-            )
-        elif not isinstance(name, str):
-            raise TypeError(
-                f"input name should be a string, but got {name.__class__.__name__}"
-            )
-        elif "." in name:
-            raise KeyError('input name can\'t contain "."')
-        elif name == "":
-            raise KeyError('input name can\'t be empty string ""')
-        elif hasattr(self, name) and name not in self._input_slots:
-            raise KeyError(f"attribute '{name}' already exists")
-        else:
-            if parameter is None:
-                parameter = name
-            param_name, param_kind = parameter, PPK.KEYWORD,
+    def read_value(self, context: dict[PortId, Any], name: str) -> tuple[Any, bool]:
+        """Get value for an input from the context."""
+        if name in self.connects:
+            pack_id = self.connects[name]
+            if pack_id in context:
+                return context[pack_id], True
 
-            self._input_slots[name] = InputSlot(
-                has_default="default" in kwargs,
-                default=kwargs.get("default", None),
-                param_name=param_name,
-                param_kind=param_kind,
-                variable=variable
-            )
+        return None, False
 
-    def register_output(self, name: str, **kwargs):
-        """Add an output slot to the node."""
-        if "_output_slots" not in self.__dict__:
-            raise AttributeError(
-                "cannot assign outputs before Node.__init__() call"
-            )
-        elif not isinstance(name, str):
-            raise TypeError(
-                f"output name should be a string, but got {name.__class__.__name__}"
-            )
-        elif "." in name:
-            raise KeyError('output name can\'t contain "."')
-        elif name == "":
-            raise KeyError('output name can\'t be empty string ""')
-        elif hasattr(self, name) and name not in self._output_slots:
-            raise KeyError(f"attribute '{name}' already exists")
-        else:
-            self._output_slots[name] = TransSlot(
-                has_default="default" in kwargs,
-                default=kwargs.get("default", None)
-            )
+    def execute(self, **kwargs: Any) -> tuple[Any]:
+        context = {PortId(self, name): value for name, value in kwargs.items()}
+        breaking = False
 
-    @property
-    def input_slots(self):
-        return self._input_slots
+        while self.exec_stack:
+            node = self.exec_stack.pop()
 
-    @property
-    def output_slots(self):
-        return self._output_slots
+            if breaking and self.loop_stack and node is self.loop_stack[-1]:
+                self.loop_stack.pop()
+                breaking = False
+                continue
 
-    def run(self, **kwargs):
-        self.execute(kwargs)
-        return tuple(self.get().values())
+            feedback = node.run(context)
 
-    def __call__(self, **kwargs: _E.AddrHandler):
-        if self._interior:
-            for name in kwargs.keys():
-                if name not in self.output_slots:
-                    self.register_output(name)
-            _E.connect_from_address(self.output_slots, kwargs)
-        else:
-            _E.connect_from_address(self.input_slots, kwargs)
-        return _E.AddrHandler(self, None, not self._interior)
+            if feedback.control == _FC.REPEAT:
+                self.exec_stack.append(node)
+                self.loop_stack.append(node)
+            elif feedback.control == _FC.BREAK:
+                breaking = True
 
-    def __getitem__(self, slot: str):
-        if slot not in self.input_slots:
-            self.register_input(slot)
-        return _E.AddrHandler(self._input_node, slot)
+            for next_node in feedback.recruit:
+                self.exec_stack.append(next_node)
 
-    def __enter__(self):
-        self._interior = True
+        results = []
 
-    def __exit__(self, type, value, trace):
-        self._interior = False
+        for key in self.source:
+            val, status = self.read_value(context, key)
 
-    def requests(self):
-        request_set: set[Node] = set()
+            if not status:
+                raise RuntimeError(
+                    f"Output '{key}' not found in graph execution context."
+                )
 
-        for outslot in self.output_slots.values():
-            request_set = request_set.union(
-                set(addr.node for addr in outslot.source_list)
-            )
+            results.append(val)
 
-        return request_set
-
-    def _send_exception(self, info: NodeExceptionData) -> None:
-        for callback in self.error_listeners:
-            callback(info)
-
-    @staticmethod
-    def _capture_error(node: Node, error: Exception, args, kwargs) -> NodeExceptionData:
-        return NodeExceptionData(
-                node=node,
-                timestamp=time.time(),
-                errtype=type(error),
-                message=str(error),
-                positional_inputs=args,
-                keyword_inputs=kwargs
-            )
-
-    def get(self):
-        return self.context.get(self)
-
-    def execute(self, data: dict[str, Any]) -> Literal[0, 1]:
-        topological_sorted = topological_sort(self.requests())
-        self.context.construct_supply_demand(topological_sorted, self)
-        self._input_node.data.clear()
-        self._input_node.data.update(data)
-
-        for node in topological_sorted:
-            args, kwargs = [], {}
-            try:
-                self.context.receive_data(node, args, kwargs)
-                results = node.run(*args, **kwargs)
-                self.context.send_data(node, results)
-            except Exception as error:
-                error_info = self._capture_error(node, error, args, kwargs)
-                self._send_exception(error_info)
-                return 1
-        else:
-            return 0
-
-    def reset(self) -> None:
-        self.context.clear()
-
-    def register_error_hook(self, callback: Callable[[NodeExceptionData], Any]):
-        self.error_listeners.append(callback)
-
-
-class GraphInputNode:
-    def __init__(self, graph: Graph, data: OrderedDict[str, Any]):
-        self.graph = graph
-        self.data = data
-
-    @property
-    def input_slots(self):
-        return {}
-
-    @property
-    def output_slots(self):
-        return self.graph.input_slots
-
-    def run(self):
-        return tuple(self.data.values())
+        return tuple(results)
