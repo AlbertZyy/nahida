@@ -53,12 +53,15 @@ class Graph:
             elif feedback.control == _FC.BREAK:
                 breaking = True
 
+            if feedback.recruit is None:
+                continue
+
             for next_node in feedback.recruit:
                 self.exec_stack.append(next_node)
 
         results = []
 
-        for key in self.source:
+        for key in self.connects:
             val, status = self.read_value(context, key)
 
             if not status:

@@ -12,16 +12,17 @@ __all__ = [
     "Branch",
     "Repeat",
     "Break",
-    "Join"
+    "Join",
+    "Group"
 ]
 
 import inspect
 from inspect import _ParameterKind as PPK
 from typing import Any, overload
 from abc import abstractmethod, ABCMeta
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Sequence
 from collections import namedtuple
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from enum import StrEnum
 
 
@@ -46,7 +47,7 @@ class FlowCtrl(StrEnum):
 @dataclass(slots=True, frozen=True)
 class NodeExecFeedback[N]:
     """Feedback from node execution."""
-    recruit: list[N] = field(default_factory=list)
+    recruit: Sequence[N] | None = None
     control: FlowCtrl = FlowCtrl.NONE
 
 
@@ -64,7 +65,7 @@ class NodeExceptionError(Exception):
 
 class OutputLengthMismatchError(Exception):
     """Raised when number of outputs does not match the number of function
-    return values."""
+    return _values."""
 
 
 class DataAlreadyExistError(Exception):
@@ -97,63 +98,76 @@ def get_inputs(func: Callable) -> Iterable[tuple[str, Any, bool]]:
 
     for name, param in sig.parameters.items():
         if param.kind in (PPK.POSITIONAL_OR_KEYWORD, PPK.KEYWORD_ONLY):
-            has_default = param.default is not PPK.empty
+            has_default = param.default is not param.empty
             yield name, param.default, has_default
         if param.kind in (PPK.POSITIONAL_ONLY, PPK.VAR_POSITIONAL):
             raise TypeError("Positional-only parameters are not supported")
 
 
 class ContextOps:
-    values: dict[str, Any]
-    connects: dict[str, PortId]
+    """
+    Supports context operations (read/write) in a node.
+    Introduce `_values` and `_connects` dicts for defaults and subscriptions.
+    __call__ is available for any subscription to others.
+    """
+    __slots__ = ("_values", "_connects")
+    _values: dict[str, Any]
+    _connects: dict[str, PortId]
 
     def __init__(self):
-        self.values = {}
-        self.connects = {}
+        self._values = {}
+        self._connects = {}
 
     def __call__(self, **kwargs: PortId | Any):
         for name, value in kwargs.items():
             if isinstance(value, PortId):
-                self.connects[name] = value
+                self._connects[name] = value
             else:
-                self.values[name] = value
+                self._values[name] = value
 
     def read_value(self, context: dict[PortId, Any], name: str) -> tuple[Any, bool]:
         """Get value for an input from the context."""
-        if name in self.connects:
-            pack_id = self.connects[name]
+        if name in self._connects:
+            pack_id = self._connects[name]
             if pack_id in context:
                 return context[pack_id], True
 
-        if name in self.values:
-            return self.values[name], True
+        if name in self._values:
+            return self._values[name], True
 
         return None, False
 
-    def write_value(self, context: dict[PortId, Any], values: tuple) -> None:
-        """Put values into the context."""
-        for i, val in enumerate(values):
+    def write_value(self, context: dict[PortId, Any], _values: tuple) -> None:
+        """Put _values into the context."""
+        for i, val in enumerate(_values):
             pack_id = PortId(id(self), i)
             context[pack_id] = val
 
 
-class _ConnectableMixin:
-    outputs: list[str]
+class _NamedOutputs:
+    """
+    Name outputs.
+    Introduce `_outputs` list for output names.
+    __getitem__ is available for subscription from others.
+    __len__ is for output number.
+    """
+    __slots__ = ("_outputs",)
+    _outputs: list[str]
 
     def __init__(self, outputs: list[str]):
-        self.outputs = outputs
+        self._outputs = outputs
 
     def __len__(self) -> int:
-        return len(self.outputs)
+        return len(self._outputs)
 
     def __getitem__(self, key: str | int) -> PortId:
         if isinstance(key, str):
             try:
-                index = self.outputs.index(key)
+                index = self._outputs.index(key)
             except ValueError as e:
                 raise ValueError(f"No output named {key!r} in {self!r}") from e
         elif isinstance(key, int):
-            if key >= len(self.outputs):
+            if key >= len(self._outputs):
                 raise IndexError(
                     f"Output index {key} out of range for {self!r}"
                 )
@@ -165,22 +179,32 @@ class _ConnectableMixin:
 
 
 class _RouterMixin:
-    downstreams: list[Node]
+    """
+    Supports routing downstream nodes.
+    Introduce `_downstreams` list for downstream nodes.
+    __rshift__ is available for routing downstream nodes.
+    """
+    __slots__ = ("_downstreams",)
+    _downstreams: list[Node]
 
     def __init__(self, downstream: list[Node]):
-        self.downstreams = downstream
+        self._downstreams = downstream
 
     def __rshift__[N: Node](self, other: N) -> N:
-        self.downstreams.append(other)
+        self._downstreams.append(other)
         return other
 
+    @property
+    def downstreams(self) -> tuple[Node, ...]:
+        return tuple(self._downstreams)
 
-class Compute(_RouterMixin, _ConnectableMixin, ContextOps):
+
+class Compute(_RouterMixin, _NamedOutputs, ContextOps):
     """Computational Node object."""
     _target: Callable
 
     def __init__(self, target: Callable, /, outputs: list[str]):
-        super(_ConnectableMixin, self).__init__()
+        super(_NamedOutputs, self).__init__()
         super(_RouterMixin, self).__init__(outputs)
         super(Compute, self).__init__([])
         sig = inspect.signature(self._target)
@@ -217,10 +241,10 @@ class Compute(_RouterMixin, _ConnectableMixin, ContextOps):
         if not isinstance(result, tuple):
             result = (result,)
 
-        if len(result) != len(self.outputs):
+        if len(result) != len(self):
             raise OutputLengthMismatchError(
                 f"Function in {self!r} returned {len(result)} "
-                f"values, but expected {len(self.outputs)}"
+                f"_values, but expected {len(self)}"
             )
 
         self.write_value(context, result)
@@ -230,13 +254,13 @@ class Compute(_RouterMixin, _ConnectableMixin, ContextOps):
 Node.register(Compute)
 
 
-class Branch(_ConnectableMixin, ContextOps):
+class Branch(_NamedOutputs, ContextOps):
     """Branch the execution based on a condition."""
     downstreams_true: list[Node]
     downstreams_false: list[Node]
 
     def __init__(self, condition: bool | PortId = False, /):
-        super(_ConnectableMixin, self).__init__()
+        super(_NamedOutputs, self).__init__()
         super(Branch, self).__init__([])
         self(condition=condition)
         self.downstreams_false = []
@@ -261,7 +285,7 @@ class Branch(_ConnectableMixin, ContextOps):
 Node.register(Branch)
 
 
-class Repeat(_RouterMixin, _ConnectableMixin, ContextOps):
+class Repeat(_RouterMixin, _NamedOutputs, ContextOps):
     """Repeat the execution for multiple times."""
     @overload
     def __init__(self, stop: int | PortId = 1, /): ...
@@ -279,7 +303,7 @@ class Repeat(_RouterMixin, _ConnectableMixin, ContextOps):
         else:
             raise TypeError("Invalid arguments")
 
-        super(_ConnectableMixin, self).__init__()
+        super(_NamedOutputs, self).__init__()
         super(_RouterMixin, self).__init__(["current"])
         super(Repeat, self).__init__([])
         self(start=start, stop=stop, step=step)
@@ -333,6 +357,7 @@ class Join(_RouterMixin):
         else:
             return NodeExecFeedback()
 
+    @Node.register
     class Receiver:
         def __init__(self, parent: "Join", index: int):
             self.parent = parent
@@ -343,3 +368,34 @@ class Join(_RouterMixin):
             return NodeExecFeedback(recruit=[self.parent])
 
 Node.register(Join)
+
+
+class Group(_RouterMixin, _NamedOutputs, ContextOps):
+    """Node group that runs a internal graph."""
+    def __init__(self, graph, values: dict[str, Any]):
+        self._graph = graph
+        ContextOps.__init__(self)
+        self(**values)
+        _NamedOutputs.__init__(self, list(graph.connects))
+        _RouterMixin.__init__(self, [])
+
+    def run(self, context: dict[PortId, Any] = {}) -> NodeExecFeedback:
+        param_set = set(self._connects.keys()) & set(self._values.keys())
+        kwargs: dict[str, Any] = {}
+
+        for param in param_set:
+            kwargs[param] = self.read_value(context, param)[0]
+
+        try:
+            result = self._graph.execute(**kwargs)
+        except Exception as e:
+            raise NodeExceptionError(
+                f"Internal graph in {self!r} raised an exception"
+            ) from e
+
+        assert isinstance(result, tuple)
+        self.write_value(context, result)
+
+        return NodeExecFeedback(recruit=self.downstreams)
+
+Node.register(Group)
