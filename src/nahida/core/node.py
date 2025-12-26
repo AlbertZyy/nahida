@@ -8,7 +8,7 @@ __all__ = [
     "OutputLengthMismatchError",
     "DataAlreadyExistError",
     "Node",
-    "Compute",
+    "Execute",
     "Branch",
     "Repeat",
     "Break",
@@ -104,9 +104,9 @@ def get_inputs(func: Callable) -> Iterable[tuple[str, Any, bool]]:
             raise TypeError("Positional-only parameters are not supported")
 
 
-class ContextOps:
+class ContextReader:
     """
-    Supports context operations (read/write) in a node.
+    Supports read_context in a node.
     Introduce `_values` and `_connects` dicts for defaults and subscriptions.
     __call__ is available for any subscription to others.
     """
@@ -125,7 +125,7 @@ class ContextOps:
             else:
                 self._values[name] = value
 
-    def read_value(self, context: dict[PortId, Any], name: str) -> tuple[Any, bool]:
+    def read_context(self, context: dict[PortId, Any], name: str) -> tuple[Any, bool]:
         """Get value for an input from the context."""
         if name in self._connects:
             pack_id = self._connects[name]
@@ -137,28 +137,18 @@ class ContextOps:
 
         return None, False
 
-    def write_value(self, context: dict[PortId, Any], _values: tuple) -> None:
-        """Put _values into the context."""
-        for i, val in enumerate(_values):
-            pack_id = PortId(id(self), i)
-            context[pack_id] = val
 
-
-class _NamedOutputs:
+class ContextWriter:
     """
-    Name outputs.
+    Supports write_value in a node.
     Introduce `_outputs` list for output names.
     __getitem__ is available for subscription from others.
-    __len__ is for output number.
     """
     __slots__ = ("_outputs",)
     _outputs: list[str]
 
     def __init__(self, outputs: list[str]):
         self._outputs = outputs
-
-    def __len__(self) -> int:
-        return len(self._outputs)
 
     def __getitem__(self, key: str | int) -> PortId:
         if isinstance(key, str):
@@ -176,6 +166,12 @@ class _NamedOutputs:
             raise TypeError(f"Invalid key type {type(key)}")
 
         return PortId(id(self), index)
+
+    def write_context(self, context: dict[PortId, Any], values: tuple) -> None:
+        """Put _values into the context."""
+        for i, val in enumerate(values):
+            pack_id = PortId(id(self), i)
+            context[pack_id] = val
 
 
 class _RouterMixin:
@@ -199,14 +195,15 @@ class _RouterMixin:
         return tuple(self._downstreams)
 
 
-class Compute(_RouterMixin, _NamedOutputs, ContextOps):
+@Node.register
+class Execute(_RouterMixin, ContextWriter, ContextReader):
     """Computational Node object."""
     _target: Callable
 
     def __init__(self, target: Callable, /, outputs: list[str]):
-        super(_NamedOutputs, self).__init__()
-        super(_RouterMixin, self).__init__(outputs)
-        super(Compute, self).__init__([])
+        ContextReader.__init__(self)
+        ContextWriter.__init__(self, outputs)
+        _RouterMixin.__init__(self, [])
         sig = inspect.signature(self._target)
 
         for param in sig.parameters.values():
@@ -223,7 +220,7 @@ class Compute(_RouterMixin, _NamedOutputs, ContextOps):
         input_kwargs = {}
 
         for param, _, has_default in get_inputs(self._target):
-            val, status = self.read_value(context, param)
+            val, status = self.read_context(context, param)
             if status:
                 input_kwargs[param] = val
                 continue
@@ -241,27 +238,19 @@ class Compute(_RouterMixin, _NamedOutputs, ContextOps):
         if not isinstance(result, tuple):
             result = (result,)
 
-        if len(result) != len(self):
-            raise OutputLengthMismatchError(
-                f"Function in {self!r} returned {len(result)} "
-                f"_values, but expected {len(self)}"
-            )
-
-        self.write_value(context, result)
+        self.write_context(context, result)
 
         return NodeExecFeedback(recruit=self.downstreams)
 
-Node.register(Compute)
 
-
-class Branch(_NamedOutputs, ContextOps):
+@Node.register
+class Branch(ContextReader):
     """Branch the execution based on a condition."""
     downstreams_true: list[Node]
     downstreams_false: list[Node]
 
     def __init__(self, condition: bool | PortId = False, /):
-        super(_NamedOutputs, self).__init__()
-        super(Branch, self).__init__([])
+        ContextReader.__init__(self)
         self(condition=condition)
         self.downstreams_false = []
         self.downstreams_true = []
@@ -275,17 +264,16 @@ class Branch(_NamedOutputs, ContextOps):
         return _RouterMixin(self.downstreams_false)
 
     def run(self, context: dict[PortId, Any] = {}):
-        val, status = self.read_value(context, "condition")
+        val, status = self.read_context(context, "condition")
 
         if bool(val) and status:
             return NodeExecFeedback(recruit=self.downstreams_true)
         else:
             return NodeExecFeedback(recruit=self.downstreams_false)
 
-Node.register(Branch)
 
-
-class Repeat(_RouterMixin, _NamedOutputs, ContextOps):
+@Node.register
+class Repeat(_RouterMixin, ContextWriter, ContextReader):
     """Repeat the execution for multiple times."""
     @overload
     def __init__(self, stop: int | PortId = 1, /): ...
@@ -303,17 +291,17 @@ class Repeat(_RouterMixin, _NamedOutputs, ContextOps):
         else:
             raise TypeError("Invalid arguments")
 
-        super(_NamedOutputs, self).__init__()
-        super(_RouterMixin, self).__init__(["current"])
-        super(Repeat, self).__init__([])
+        ContextReader.__init__(self)
+        ContextWriter.__init__(self, ["current"])
+        _RouterMixin.__init__(self, [])
         self(start=start, stop=stop, step=step)
         self.iterator = None
 
     def run(self, context: dict[PortId, Any] = {}):
         if self.iterator is None:
-            start = self.read_value(context, "start")[0]
-            stop = self.read_value(context, "stop")[0]
-            step = self.read_value(context, "step")[0]
+            start = self.read_context(context, "start")[0]
+            stop = self.read_context(context, "stop")[0]
+            step = self.read_context(context, "step")[0]
             self.iterator = iter(range(start, stop, step))
             current = next(self.iterator)
         # NOTE: Advance the iterator by one step so that when the next step is
@@ -325,24 +313,22 @@ class Repeat(_RouterMixin, _NamedOutputs, ContextOps):
         except StopIteration:
             self.iterator = None
 
-        self.write_value(context, (current,))
+        self.write_context(context, (current,))
         current = next_val
         return NodeExecFeedback(
             recruit=self.downstreams,
             control=FlowCtrl.NONE if (self.iterator is None) else FlowCtrl.REPEAT
         )
 
-Node.register(Repeat)
 
-
+@Node.register
 class Break:
     """Break the repeat loop."""
     def run(self, context: dict[PortId, Any] = {}):
         return NodeExecFeedback(control=FlowCtrl.BREAK)
 
-Node.register(Break)
 
-
+@Node.register
 class Join(_RouterMixin):
     """Block the execution until all receivers are triggered."""
     def __init__(self, num: int = 2):
@@ -367,16 +353,15 @@ class Join(_RouterMixin):
             self.parent.flags[self.index] = True
             return NodeExecFeedback(recruit=[self.parent])
 
-Node.register(Join)
 
-
-class Group(_RouterMixin, _NamedOutputs, ContextOps):
+@Node.register
+class Group(_RouterMixin, ContextWriter, ContextReader):
     """Node group that runs a internal graph."""
     def __init__(self, graph, values: dict[str, Any]):
         self._graph = graph
-        ContextOps.__init__(self)
+        ContextReader.__init__(self)
         self(**values)
-        _NamedOutputs.__init__(self, list(graph.connects))
+        ContextWriter.__init__(self, list(graph.connects))
         _RouterMixin.__init__(self, [])
 
     def run(self, context: dict[PortId, Any] = {}) -> NodeExecFeedback:
@@ -384,7 +369,7 @@ class Group(_RouterMixin, _NamedOutputs, ContextOps):
         kwargs: dict[str, Any] = {}
 
         for param in param_set:
-            kwargs[param] = self.read_value(context, param)[0]
+            kwargs[param] = self.read_context(context, param)[0]
 
         try:
             result = self._graph.execute(**kwargs)
@@ -394,8 +379,6 @@ class Group(_RouterMixin, _NamedOutputs, ContextOps):
             ) from e
 
         assert isinstance(result, tuple)
-        self.write_value(context, result)
+        self.write_context(context, result)
 
         return NodeExecFeedback(recruit=self.downstreams)
-
-Node.register(Group)
