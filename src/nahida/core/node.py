@@ -114,9 +114,10 @@ class ContextReader:
     _values: dict[str, Any]
     _connects: dict[str, PortId]
 
-    def __init__(self):
+    def __init__(self, **kwargs: PortId | Any):
         self._values = {}
         self._connects = {}
+        self(**kwargs)
 
     def __call__(self, **kwargs: PortId | Any):
         for name, value in kwargs.items():
@@ -147,7 +148,7 @@ class ContextWriter:
     __slots__ = ("_outputs",)
     _outputs: list[str]
 
-    def __init__(self, outputs: list[str]):
+    def __init__(self, outputs: list[str], /):
         self._outputs = outputs
 
     def __getitem__(self, key: str | int) -> PortId:
@@ -183,7 +184,7 @@ class _RouterMixin:
     __slots__ = ("_downstreams",)
     _downstreams: list[Node]
 
-    def __init__(self, downstream: list[Node]):
+    def __init__(self, downstream: list[Node], /):
         self._downstreams = downstream
 
     def __rshift__[N: Node](self, other: N) -> N:
@@ -250,8 +251,7 @@ class Branch(ContextReader):
     downstreams_false: list[Node]
 
     def __init__(self, condition: bool | PortId = False, /):
-        ContextReader.__init__(self)
-        self(condition=condition)
+        ContextReader.__init__(self, condition=condition)
         self.downstreams_false = []
         self.downstreams_true = []
 
@@ -291,11 +291,15 @@ class Repeat(_RouterMixin, ContextWriter, ContextReader):
         else:
             raise TypeError("Invalid arguments")
 
-        ContextReader.__init__(self)
+        ContextReader.__init__(self, start=start, stop=stop, step=step)
         ContextWriter.__init__(self, ["current"])
         _RouterMixin.__init__(self, [])
-        self(start=start, stop=stop, step=step)
         self.iterator = None
+        self.downstreams_stop = []
+
+    @property
+    def stop(self):
+        return _RouterMixin(self.downstreams_stop)
 
     def run(self, context: dict[PortId, Any] = {}):
         if self.iterator is None:
@@ -303,21 +307,19 @@ class Repeat(_RouterMixin, ContextWriter, ContextReader):
             stop = self.read_context(context, "stop")[0]
             step = self.read_context(context, "step")[0]
             self.iterator = iter(range(start, stop, step))
-            current = next(self.iterator)
-        # NOTE: Advance the iterator by one step so that when the next step is
-        # about to trigger StopIteration, the loop exits immediately.
-        # This avoids triggering StopIteration at the current step and not
-        # recruiting any downstream nodes.
         try:
-            next_val = next(self.iterator)
+            current = next(self.iterator)
         except StopIteration:
             self.iterator = None
+            return NodeExecFeedback(
+                recruit=self.downstreams_stop,
+                control=FlowCtrl.NONE
+            )
 
         self.write_context(context, (current,))
-        current = next_val
         return NodeExecFeedback(
             recruit=self.downstreams,
-            control=FlowCtrl.NONE if (self.iterator is None) else FlowCtrl.REPEAT
+            control=FlowCtrl.REPEAT
         )
 
 
@@ -359,8 +361,7 @@ class Group(_RouterMixin, ContextWriter, ContextReader):
     """Node group that runs a internal graph."""
     def __init__(self, graph, values: dict[str, Any]):
         self._graph = graph
-        ContextReader.__init__(self)
-        self(**values)
+        ContextReader.__init__(self, **values)
         ContextWriter.__init__(self, list(graph.connects))
         _RouterMixin.__init__(self, [])
 
