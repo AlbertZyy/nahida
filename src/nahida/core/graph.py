@@ -19,8 +19,8 @@ class CircularRecruitmentError(Exception):
 
 
 def execute(
-    context: dict[PortId, Any], starters: Iterable[Node]
-) -> dict[PortId, Any]:
+    context: dict[int, Any], starters: Iterable[Node]
+) -> dict[int, Any]:
     """
     Execute nodes with given inputs.
 
@@ -46,18 +46,22 @@ def execute(
             breaking = False
             continue
 
-        feedback = node.run(context)
+        task = node.submit(context)
 
-        if feedback.control == _FC.REPEAT:
+        if task.target is not None:
+            result = task.target(*task.args, **task.kwargs)
+            node.write(context, result)
+
+        if task.control == _FC.REPEAT:
             exec_stack.append(node)
             loop_stack.append(node)
-        elif feedback.control == _FC.BREAK:
+        elif task.control == _FC.BREAK:
             breaking = True
 
-        if feedback.recruit is None:
+        if task.recruit is None:
             continue
 
-        for next_node in feedback.recruit:
+        for next_node in task.recruit:
             next_id = id(next_node)
             if next_id in trace:
                 raise CircularRecruitmentError(
@@ -72,10 +76,11 @@ def execute(
 
 
 class Graph:
-    def __init__(self):
+    def __init__(self, starters: Iterable[Node]):
+        self.starters = starters
         self.connects: dict[str, PortId] = {}
 
-    def __getitem__(self, item: str):
+    def __getitem__(self, item: Any):
         return PortId(self, item)
 
     def __call__(self, **kwargs: PortId):
@@ -88,19 +93,22 @@ class Graph:
                     f"got {type(value).__name__!r}."
                 )
 
-    def read_value(self, context: dict[PortId, Any], name: str) -> tuple[Any, bool]:
+    def read_value(self, context: dict[int, Any], name: str) -> tuple[Any, bool]:
         """Get value for an input from the context."""
         if name in self.connects:
-            pack_id = self.connects[name]
-            if pack_id in context:
-                return context[pack_id], True
+            node_id, index = self.connects[name]
+            if node_id in context:
+                val = context[node_id]
+                if index is not None:
+                    val = val[index]
+                return val, True
 
         return None, False
 
-    def execute(self, starters: Iterable[Node], /, **kwargs: Any) -> tuple[Any]:
-        context = {PortId(self, name): value for name, value in kwargs.items()}
-        context = execute(context, starters)
-        results = []
+    def forward(self, **kwargs: Any) -> dict[str, Any]:
+        context = {id(self): kwargs}
+        context = execute(context, self.starters)
+        results: dict[str, Any] = {}
 
         for key in self.connects:
             val, status = self.read_value(context, key)
@@ -110,9 +118,9 @@ class Graph:
                     f"Output '{key}' not found in graph execution context."
                 )
 
-            results.append(val)
+            results[key] = val
 
-        return tuple(results)
+        return results
 
 
 class GraphThread(Thread):
