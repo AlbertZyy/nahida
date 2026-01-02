@@ -46,7 +46,10 @@ class FlowCtrl(StrEnum):
 
 @dataclass(slots=True, frozen=True)
 class TaskItem:
-    """Task item for a node."""
+    """Task item for a node.
+
+    See `Node.submit` for details.
+    """
     target: Callable | None = None
     args: tuple[Any, ...] = field(default_factory=tuple)
     kwargs: dict[str, Any] = field(default_factory=dict)
@@ -78,12 +81,28 @@ class DataAlreadyExistError(Exception):
 class Node(object):
     """Abstract base class for all nodes.
 
-    Node is a computational unit that can be connected to other nodes.
-    It supports method `submit` which receives a context of the environment,
-    and returns an execution task back to the task queue.
+    Nodes are computational units that can be connected to other nodes, and
+    are designed with the following interfaces:
+      - `submit`: submit execution/scheduling tasks to the controller,
+      - `write`: put output values to the context,
+
+    where `submit` is abstract and must be implemented by subclasses, and
+    `write` is defaults to putting values into the context dict directly.
+    Here `context` is a dictionary of node IDs to the
+    corresponding output values.
     """
     def submit(self, context: dict[int, Any]) -> TaskItem:
         """Get a task to be submitted to the task queue.
+
+        A task item is a dataclass containing the following fields:
+        - target: the function to be executed. None for no execution tasks.
+        - args: the positional arguments.
+        - kwargs: the keyword arguments.
+        - recruit: the nodes to be recruited, also the downstreams.
+        - control: the control instruction after execution.
+
+        where the target, args and kwargs represents an exection task, while
+        recruit and control for a scheduling task.
 
         Args:
             context (dict[int, Any]): The context of the environment.
@@ -124,7 +143,7 @@ class _ContextReader:
     _values: dict[str, Any]
     _connects: dict[str, PortId]
 
-    def __init__(self, **kwargs: PortId | Any):
+    def __init__(self, **kwargs: PortId | Node | Any):
         self._values = {}
         self._connects = {}
         self(**kwargs)

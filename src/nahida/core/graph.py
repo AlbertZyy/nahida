@@ -21,13 +21,11 @@ class CircularRecruitmentError(Exception):
 def execute(
     context: dict[int, Any], starters: Iterable[Node]
 ) -> dict[int, Any]:
-    """
-    Execute nodes with given inputs.
+    """Execute nodes with given inputs.
 
     Args:
-        container (Any): The container object, used for PortId creation.
+        context (dict[int, Any]): Running context.
         starters (Iterable[Node]): The starting nodes to execute.
-        **kwargs (Any): Initial input values mapped by their names.
 
     Returns:
         dict: The remaining context, mapping from PortId to their values.
