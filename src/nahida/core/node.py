@@ -27,7 +27,7 @@ from enum import StrEnum
 
 
 PortId = namedtuple("PortId", ["node_id", "index"])
-"""Port identifier."""
+type PortOrNode = PortId | Node
 
 
 class FlowCtrl(StrEnum):
@@ -53,7 +53,7 @@ class TaskItem:
     target: Callable | None = None
     args: tuple[Any, ...] = field(default_factory=tuple)
     kwargs: dict[str, Any] = field(default_factory=dict)
-    recruit: Sequence[Node] | None = None
+    recruit: set[Node] | None = None
     control: FlowCtrl = FlowCtrl.NONE
 
 
@@ -138,17 +138,26 @@ class _ContextReader:
     """Supports read_context in a node.
 
     Introduce `_values` and `_connects` dicts for defaults and subscriptions.
-    __call__ is available for any subscription to others.
     """
     _values: dict[str, Any]
     _connects: dict[str, PortId]
 
-    def __init__(self, **kwargs: PortId | Node | Any):
+    def __init__(self, **kwargs: PortOrNode | Any):
         self._values = {}
         self._connects = {}
-        self(**kwargs)
+        self.subscribe(**kwargs)
 
-    def __call__(self, **kwargs: PortId | Node | Any):
+    def subscribe(self, **kwargs: PortOrNode | Any) -> None:
+        """Set subscriptions for attributes.
+
+        An attribute may take values from other nodes or constants. Use pairs
+        like `arg1=node` or `arg1=value` to define the souce of the attribute
+        named `arg1`. Use `arg1=node[index]` for source nodes returning a
+        tuple, list, dict or any other types that supports __getitem__.
+
+        Args:
+            **kwargs (PortId | Node | Any): The attribute-source pairs.
+        """
         for name, value in kwargs.items():
             if isinstance(value, PortId):
                 self._connects[name] = value
@@ -156,6 +165,12 @@ class _ContextReader:
                 self._connects[name] = PortId(id(value), None)
             else:
                 self._values[name] = value
+
+    def unsubscribe(self, *names: str) -> None:
+        """Remove subscriptions for attributes."""
+        for name in names:
+            self._values.pop(name, None)
+            self._connects.pop(name, None)
 
     def __getitem__(self, key: str | int) -> PortId:
         return PortId(id(self), key)
@@ -183,34 +198,48 @@ class _ContextReader:
         return None, False
 
 
-class _RouterMixin:
+class _Recruiter:
     """Supports routing downstream nodes.
 
     Introduce `_downstreams` list for downstream nodes.
-    __rshift__ is available for routing downstream nodes.
+    `link` and `unlink` are available for manage downstream nodes.
     """
-    _downstreams: list[Node]
+    _downstreams: set[Node]
 
-    def __init__(self, downstream: list[Node], /):
+    def __init__(self, downstream: set[Node] | None = None, /):
+        if downstream is None:
+            downstream = set()
         self._downstreams = downstream
 
-    def __rshift__[N: Node](self, other: N) -> N:
-        self._downstreams.append(other)
-        return other
+    def link(self, *other: Node) -> None:
+        """Add downstream nodes to be recruited after execution.
+
+        Args:
+            *other (Node): The downstream nodes to be added.
+        """
+        self._downstreams.union(other)
+
+    def unlink(self, *other: Node) -> None:
+        """Remove downstream nodes. Do nothing for non-existent nodes.
+
+        Args:
+            *other (Node): The downstream nodes to be removed.
+        """
+        self._downstreams.difference_update(other)
 
     @property
-    def downstreams(self) -> tuple[Node, ...]:
-        return tuple(self._downstreams)
+    def downstreams(self) -> set[Node]:
+        return self._downstreams
 
 
-class Execute(_RouterMixin, _ContextReader, Node):
+class Execute(_Recruiter, _ContextReader, Node):
     """Computational Node object."""
     _target: Callable
 
     def __init__(self, target: Callable, /):
         _ContextReader.__init__(self)
-        _RouterMixin.__init__(self, [])
-        sig = inspect.signature(self._target)
+        _Recruiter.__init__(self)
+        sig = inspect.signature(target)
 
         for param in sig.parameters.values():
             if param.kind in (PPK.POSITIONAL_ONLY, PPK.VAR_POSITIONAL):
@@ -242,39 +271,39 @@ class Execute(_RouterMixin, _ContextReader, Node):
 
 class Branch(_ContextReader, Node):
     """Branch the execution based on a condition."""
-    downstreams_true: list[Node]
-    downstreams_false: list[Node]
+    _downstreams_true: set[Node]
+    _downstreams_false: set[Node]
 
-    def __init__(self, condition: bool | PortId = False, /):
+    def __init__(self, condition: PortOrNode | bool = False, /):
         _ContextReader.__init__(self, condition=condition)
-        self.downstreams_false = []
-        self.downstreams_true = []
+        self._downstreams_true = set()
+        self._downstreams_false = set()
 
     @property
     def true(self):
         """Execute downstream nodes when condition is True."""
-        return _RouterMixin(self.downstreams_true)
+        return _Recruiter(self._downstreams_true)
 
     @property
     def false(self):
         """Execute downstream nodes when condition is False."""
-        return _RouterMixin(self.downstreams_false)
+        return _Recruiter(self._downstreams_false)
 
     def submit(self, context: dict[int, Any] = {}):
         val, status = self.read_context(context, "condition")
 
         if bool(val) and status:
-            return TaskItem(recruit=self.downstreams_true)
+            return TaskItem(recruit=self._downstreams_true)
         else:
-            return TaskItem(recruit=self.downstreams_false)
+            return TaskItem(recruit=self._downstreams_false)
 
 
-class Repeat(_RouterMixin, _ContextReader, Node):
+class Repeat(_Recruiter, _ContextReader, Node):
     """Repeat the execution for multiple times."""
     @overload
-    def __init__(self, stop: int | PortId = 1, /): ...
+    def __init__(self, stop: int | PortOrNode = 1, /): ...
     @overload
-    def __init__(self, start: int | PortId, stop: int | PortId, step: int | PortId = 1, /): ...
+    def __init__(self, start: int | PortOrNode, stop: int | PortOrNode, step: int | PortOrNode = 1, /): ...
     def __init__(self, *args):
         if len(args) == 0:
             start, stop, step = 0, 1, 1
@@ -288,27 +317,27 @@ class Repeat(_RouterMixin, _ContextReader, Node):
             raise TypeError("Invalid arguments")
 
         _ContextReader.__init__(self, start=start, stop=stop, step=step)
-        _RouterMixin.__init__(self, [])
-        self.iterator = None
-        self.downstreams_stop = []
+        _Recruiter.__init__(self)
+        self._iterator = None
+        self._downstreams_stop: set[Node] = set()
 
     @property
     def stop(self):
         """Execute downstream nodes when the loop is stopped."""
-        return _RouterMixin(self.downstreams_stop)
+        return _Recruiter(self._downstreams_stop)
 
     def submit(self, context: dict[int, Any] = {}):
-        if self.iterator is None:
+        if self._iterator is None:
             start = self.read_context(context, "start")[0]
             stop = self.read_context(context, "stop")[0]
             step = self.read_context(context, "step")[0]
-            self.iterator = iter(range(start, stop, step))
+            self._iterator = iter(range(start, stop, step))
         try:
-            current = next(self.iterator)
+            current = next(self._iterator)
         except StopIteration:
-            self.iterator = None
+            self._iterator = None
             return TaskItem(
-                recruit=self.downstreams_stop,
+                recruit=self._downstreams_stop,
                 control=FlowCtrl.NONE
             )
 
@@ -325,10 +354,10 @@ class Break(Node):
         return TaskItem(control=FlowCtrl.BREAK)
 
 
-class Join(_RouterMixin, Node):
+class Join(_Recruiter, Node):
     """Block the execution until all receivers are triggered."""
     def __init__(self, num: int = 2):
-        super().__init__([])
+        _Recruiter.__init__(self)
         self.receivers = tuple(Join.Receiver(self, i) for i in range(num))
         self.flags = [False] * num
 
@@ -347,15 +376,15 @@ class Join(_RouterMixin, Node):
 
         def submit(self, context: dict[int, Any] = {}):
             self.parent.flags[self.index] = True
-            return TaskItem(recruit=[self.parent])
+            return TaskItem(recruit={self.parent,})
 
 
-class Group(_RouterMixin, _ContextReader, Node):
+class Group(_Recruiter, _ContextReader, Node):
     """Node group that runs a internal graph."""
     def __init__(self, graph, values: dict[str, Any]):
         self._graph = graph
         _ContextReader.__init__(self, **values)
-        _RouterMixin.__init__(self, [])
+        _Recruiter.__init__(self)
 
     def submit(self, context: dict[int, Any] = {}) -> TaskItem:
         param_set = set(self._connects.keys()) & set(self._values.keys())

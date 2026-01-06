@@ -8,7 +8,7 @@ __all__ = [
 
 from threading import Thread
 from queue import Queue
-from typing import Any
+from typing import Any, overload
 from collections.abc import Iterable
 
 from .node import Node, PortId, FlowCtrl as _FC
@@ -73,18 +73,28 @@ def execute(
     return context
 
 
-class Graph:
+class Graph[**P]:
     def __init__(self, starters: Iterable[Node]):
-        self.starters = starters
-        self.connects: dict[str, PortId] = {}
+        self._starters = starters
+        self._connects: dict[str, PortId] = {}
 
-    def __getitem__(self, item: Any):
-        return PortId(self, item)
+    def input(self, index_or_key: Any = None, /) -> PortId:
+        return PortId(id(self), index_or_key)
 
-    def __call__(self, **kwargs: PortId):
+    @overload
+    def set_output(self, arg: PortId | Node, /) -> None: ...
+    @overload
+    def set_output(self, args: tuple[PortId | Node, ...], /) -> None: ...
+    @overload
+    def set_output(self, kwds: dict[str, PortId | Node], /) -> None: ...
+    @overload
+    def set_output(self, /, **kwargs: PortId | Node) -> None: ...
+    def set_output(self, arg1=None, /, **kwargs: PortId | Node):
         for name, value in kwargs.items():
             if isinstance(value, PortId):
-                self.connects[name] = value
+                self._connects[name] = value
+            elif isinstance(value, Node):
+                self._connects[name] = PortId(id(value), None)
             else:
                 raise TypeError(
                     f"Graph output {name!r} must connect to a PortId, "
@@ -93,8 +103,8 @@ class Graph:
 
     def read_value(self, context: dict[int, Any], name: str) -> tuple[Any, bool]:
         """Get value for an input from the context."""
-        if name in self.connects:
-            node_id, index = self.connects[name]
+        if name in self._connects:
+            node_id, index = self._connects[name]
             if node_id in context:
                 val = context[node_id]
                 if index is not None:
@@ -103,12 +113,19 @@ class Graph:
 
         return None, False
 
-    def forward(self, **kwargs: Any) -> dict[str, Any]:
-        context = {id(self): kwargs}
-        context = execute(context, self.starters)
+    def forward(self, *args: P.args, **kwargs: P.kwargs) -> dict[str, Any]:
+        if args or kwargs:
+            initial: dict[int | str, Any] = {}
+            initial.update(enumerate(args))
+            initial.update(kwargs)
+            context = {id(self): initial}
+        else:
+            context = {}
+
+        context = execute(context, self._starters)
         results: dict[str, Any] = {}
 
-        for key in self.connects:
+        for key in self._connects:
             val, status = self.read_value(context, key)
 
             if not status:
