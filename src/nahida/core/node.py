@@ -5,9 +5,6 @@ __all__ = [
     "TaskItem",
     "InputDataNotFoundError",
     "InputMissingError",
-    "NodeExceptionError",
-    "OutputLengthMismatchError",
-    "DataAlreadyExistError",
     "Node",
     "Execute",
     "Branch",
@@ -19,14 +16,17 @@ __all__ = [
 
 import inspect
 from inspect import _ParameterKind as PPK
-from typing import Any, overload
-from collections.abc import Callable, Iterable, Sequence
-from collections import namedtuple
+from typing import Any, overload, NamedTuple
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from enum import StrEnum
 
 
-PortId = namedtuple("PortId", ["node_id", "index"])
+class PortId(NamedTuple):
+    """Port ID for a node."""
+    node_id: int
+    index: int | str | None
+
 type PortOrNode = PortId | Node
 
 
@@ -57,25 +57,12 @@ class TaskItem:
     control: FlowCtrl = FlowCtrl.NONE
 
 
-class InputDataNotFoundError(Exception):
+class InputDataNotFoundError(RuntimeError):
     """Raised when connected input data cannot be found in the context."""
 
 
-class InputMissingError(Exception):
+class InputMissingError(RuntimeError):
     """Raised when any required input is missing."""
-
-
-class NodeExceptionError(Exception):
-    """Raised when an error occurs in the node's exception handling."""
-
-
-class OutputLengthMismatchError(Exception):
-    """Raised when number of outputs does not match the number of function
-    return _values."""
-
-
-class DataAlreadyExistError(Exception):
-    """Raised when output data already exist in the context."""
 
 
 class Node(object):
@@ -145,9 +132,12 @@ class _ContextReader:
     def __init__(self, **kwargs: PortOrNode | Any):
         self._values = {}
         self._connects = {}
-        self.subscribe(**kwargs)
+        self.subs(**kwargs)
 
-    def subscribe(self, **kwargs: PortOrNode | Any) -> None:
+    def __getitem__(self, key: str | int) -> PortId:
+        return PortId(id(self), key)
+
+    def subs(self, **kwargs: PortOrNode | Any) -> None:
         """Set subscriptions for attributes.
 
         An attribute may take values from other nodes or constants. Use pairs
@@ -166,14 +156,11 @@ class _ContextReader:
             else:
                 self._values[name] = value
 
-    def unsubscribe(self, *names: str) -> None:
+    def unsubs(self, *names: str) -> None:
         """Remove subscriptions for attributes."""
         for name in names:
             self._values.pop(name, None)
             self._connects.pop(name, None)
-
-    def __getitem__(self, key: str | int) -> PortId:
-        return PortId(id(self), key)
 
     def read_context(self, context: dict[int, Any], name: str) -> tuple[Any, bool]:
         """Get value for an input from the context."""
@@ -274,7 +261,7 @@ class Branch(_ContextReader, Node):
     _downstreams_true: set[Node]
     _downstreams_false: set[Node]
 
-    def __init__(self, condition: PortOrNode | bool = False, /):
+    def __init__(self, condition: PortOrNode | bool = False, /) -> None:
         _ContextReader.__init__(self, condition=condition)
         self._downstreams_true = set()
         self._downstreams_false = set()
@@ -301,10 +288,10 @@ class Branch(_ContextReader, Node):
 class Repeat(_Recruiter, _ContextReader, Node):
     """Repeat the execution for multiple times."""
     @overload
-    def __init__(self, stop: int | PortOrNode = 1, /): ...
+    def __init__(self, stop: int | PortOrNode = 1, /) -> None: ...
     @overload
-    def __init__(self, start: int | PortOrNode, stop: int | PortOrNode, step: int | PortOrNode = 1, /): ...
-    def __init__(self, *args):
+    def __init__(self, start: int | PortOrNode, stop: int | PortOrNode, step: int | PortOrNode = 1, /) -> None: ...
+    def __init__(self, *args) -> None:
         if len(args) == 0:
             start, stop, step = 0, 1, 1
         elif len(args) == 1:
