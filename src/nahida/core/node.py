@@ -2,10 +2,10 @@ from __future__ import annotations
 
 __all__ = [
     "PortId",
+    "FlowCtrl",
     "TaskItem",
-    "InputDataNotFoundError",
-    "InputMissingError",
     "Node",
+    "NamedNode",
     "Execute",
     "Branch",
     "Repeat",
@@ -20,6 +20,8 @@ from typing import Any, overload, NamedTuple
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from enum import StrEnum
+
+from .errors import *
 
 
 class PortId(NamedTuple):
@@ -55,14 +57,6 @@ class TaskItem:
     kwargs: dict[str, Any] = field(default_factory=dict)
     recruit: set[Node] | None = None
     control: FlowCtrl = FlowCtrl.NONE
-
-
-class InputDataNotFoundError(RuntimeError):
-    """Raised when connected input data cannot be found in the context."""
-
-
-class InputMissingError(RuntimeError):
-    """Raised when any required input is missing."""
 
 
 class Node(object):
@@ -108,6 +102,10 @@ class Node(object):
         """
         context[id(self)] = values
 
+    def __repr__(self) -> str:
+        type_name = self.__class__.__name__
+        return "<{} node at {}>".format(type_name, hex(id(self)))
+
 
 def get_inputs(func: Callable) -> Iterable[tuple[str, Any, bool]]:
     """Return the node's input names and defaults."""
@@ -119,6 +117,28 @@ def get_inputs(func: Callable) -> Iterable[tuple[str, Any, bool]]:
             yield name, param.default, has_default
         if param.kind in (PPK.POSITIONAL_ONLY, PPK.VAR_POSITIONAL):
             raise TypeError("Positional-only parameters are not supported")
+
+
+class NamedNode(Node):
+    """Nodes support unique names as the keys."""
+
+    def __init__(self, *, uname: Any = None) -> None:
+        self.uname = uname
+
+    def __repr__(self) -> str:
+        type_name = self.__class__.__name__
+
+        if self.uname:
+            return "{}({})".format(type_name, self.uname)
+
+        return super().__repr__()
+
+    @property
+    def __name__(self):
+        if self.uname:
+            return self.uname
+
+        return super().__repr__()
 
 
 class _ContextReader:
@@ -171,13 +191,14 @@ class _ContextReader:
                 val = context[node_id]
 
                 if index is not None:
-                    val = val[index]
+                    try:
+                        val = val[index]
+                    except (KeyError, IndexError) as e:
+                        raise DataGetItemError(self, name, index) from e
 
                 return val, True
 
-            raise InputDataNotFoundError(
-                f"Input {name!r} of {self!r} cannot be found in the context"
-            )
+            raise SubscribedNotFoundError(self, name)
 
         if name in self._values:
             return self._values[name], True
@@ -219,11 +240,12 @@ class _Recruiter:
         return self._downstreams
 
 
-class Execute(_Recruiter, _ContextReader, Node):
+class Execute(_Recruiter, _ContextReader, NamedNode):
     """Computational Node object."""
     _target: Callable
 
-    def __init__(self, target: Callable, /):
+    def __init__(self, target: Callable, /, *, uname: Any = None):
+        NamedNode.__init__(self, uname=uname)
         _ContextReader.__init__(self)
         _Recruiter.__init__(self)
         sig = inspect.signature(target)
@@ -233,9 +255,6 @@ class Execute(_Recruiter, _ContextReader, Node):
                 raise TypeError("Positional-only parameters are not supported")
 
         self._target = target
-
-    def __repr__(self) -> str:
-        return f"<Node {self._target.__name__} at {hex(id(self))}>"
 
     def submit(self, context: dict[int, Any] = {}):
         input_kwargs = {}
@@ -247,7 +266,7 @@ class Execute(_Recruiter, _ContextReader, Node):
                 continue
             if has_default:
                 continue
-            raise InputMissingError(f"No value for input {param!r} in {self!r}")
+            raise ParamMissingError(self, param)
 
         return TaskItem(
             target=self._target,
@@ -256,12 +275,13 @@ class Execute(_Recruiter, _ContextReader, Node):
         )
 
 
-class Branch(_ContextReader, Node):
+class Branch(_ContextReader, NamedNode):
     """Branch the execution based on a condition."""
     _downstreams_true: set[Node]
     _downstreams_false: set[Node]
 
-    def __init__(self, condition: PortOrNode | bool = False, /) -> None:
+    def __init__(self, condition: PortOrNode | bool = False, /, *, uname: Any = None) -> None:
+        NamedNode.__init__(self, uname=uname)
         _ContextReader.__init__(self, condition=condition)
         self._downstreams_true = set()
         self._downstreams_false = set()
@@ -285,13 +305,13 @@ class Branch(_ContextReader, Node):
             return TaskItem(recruit=self._downstreams_false)
 
 
-class Repeat(_Recruiter, _ContextReader, Node):
+class Repeat(_Recruiter, _ContextReader, NamedNode):
     """Repeat the execution for multiple times."""
     @overload
-    def __init__(self, stop: int | PortOrNode = 1, /) -> None: ...
+    def __init__(self, stop: int | PortOrNode = 1, /, *, uname: Any = None) -> None: ...
     @overload
-    def __init__(self, start: int | PortOrNode, stop: int | PortOrNode, step: int | PortOrNode = 1, /) -> None: ...
-    def __init__(self, *args) -> None:
+    def __init__(self, start: int | PortOrNode, stop: int | PortOrNode, step: int | PortOrNode = 1, /, *, uname: Any = None) -> None: ...
+    def __init__(self, *args, uname: Any = None) -> None:
         if len(args) == 0:
             start, stop, step = 0, 1, 1
         elif len(args) == 1:
@@ -303,6 +323,7 @@ class Repeat(_Recruiter, _ContextReader, Node):
         else:
             raise TypeError("Invalid arguments")
 
+        NamedNode.__init__(self, uname=uname)
         _ContextReader.__init__(self, start=start, stop=stop, step=step)
         _Recruiter.__init__(self)
         self._iterator = None
@@ -335,15 +356,16 @@ class Repeat(_Recruiter, _ContextReader, Node):
         )
 
 
-class Break(Node):
+class Break(NamedNode):
     """Break the repeat loop."""
     def submit(self, context: dict[int, Any] = {}):
         return TaskItem(control=FlowCtrl.BREAK)
 
 
-class Join(_Recruiter, Node):
+class Join(_Recruiter, NamedNode):
     """Block the execution until all receivers are triggered."""
-    def __init__(self, num: int = 2):
+    def __init__(self, num: int = 2, *, uname: Any = None):
+        NamedNode.__init__(self, uname=uname)
         _Recruiter.__init__(self)
         self.receivers = tuple(Join.Receiver(self, i) for i in range(num))
         self.flags = [False] * num
@@ -366,12 +388,13 @@ class Join(_Recruiter, Node):
             return TaskItem(recruit={self.parent,})
 
 
-class Group(_Recruiter, _ContextReader, Node):
+class Group(_Recruiter, _ContextReader, NamedNode):
     """Node group that runs a internal graph."""
-    def __init__(self, graph, values: dict[str, Any]):
-        self._graph = graph
+    def __init__(self, graph, values: dict[str, Any], *, uname: Any = None):
+        NamedNode.__init__(self, uname=uname)
         _ContextReader.__init__(self, **values)
         _Recruiter.__init__(self)
+        self._graph = graph
 
     def submit(self, context: dict[int, Any] = {}) -> TaskItem:
         param_set = set(self._connects.keys()) & set(self._values.keys())

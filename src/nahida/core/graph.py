@@ -11,11 +11,8 @@ from queue import Queue
 from typing import Any
 from collections.abc import Iterable, Callable
 
-from .node import Node, PortId, PortOrNode, FlowCtrl as _FC, InputDataNotFoundError
-
-
-class CircularRecruitmentError(Exception):
-    """Raised when circular recruitment occurs."""
+from .errors import *
+from .node import Node, PortId, PortOrNode, FlowCtrl as _FC
 
 
 def execute(
@@ -62,10 +59,7 @@ def execute(
         for next_node in task.recruit:
             next_id = id(next_node)
             if next_id in trace:
-                raise CircularRecruitmentError(
-                    f"{node!r} wants to recruit {next_node!r} that exists "
-                    "in the execution path."
-                )
+                raise CircularRecruitmentError(node, next_node)
 
             exec_stack.append(next_node)
             trace_stack.append(trace | {next_id})
@@ -115,13 +109,12 @@ class Graph[**P, R]:
                 f"Expected PortId or Node, got {type(single).__name__!r}."
             )
 
-    @staticmethod
-    def _read_context(context: dict[int, Any], port_id: PortId):
+    def _read_context(self, context: dict[int, Any], port_id: PortId, name: Any = None):
         node_id, index = port_id
         try:
             val = context[node_id]
         except KeyError:
-            raise InputDataNotFoundError()
+            raise ExposedNotFoundError(self, name)
 
         if index is not None:
             val = val[index]
