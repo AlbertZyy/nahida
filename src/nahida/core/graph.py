@@ -1,6 +1,6 @@
+# nahida/core/graph.py
 
 __all__ = [
-    "CircularRecruitmentError",
     "execute",
     "Graph",
     "GraphThread"
@@ -11,8 +11,11 @@ from queue import Queue
 from typing import Any
 from collections.abc import Iterable, Callable
 
-from .errors import *
-from .node import Node, PortId, PortOrNode, FlowCtrl as _FC
+from .import expr as _expr
+from .import errors as _err
+from .node import Node, FlowCtrl as _FC, ExprOrNode
+
+Expr = _expr.Expr
 
 
 def execute(
@@ -59,7 +62,7 @@ def execute(
         for next_node in task.recruit:
             next_id = id(next_node)
             if next_id in trace:
-                raise CircularRecruitmentError(node, next_node)
+                raise _err.CircularRecruitmentError(node, next_node)
 
             exec_stack.append(next_node)
             trace_stack.append(trace | {next_id})
@@ -71,17 +74,17 @@ class Graph[**P, R]:
     def __init__(
         self,
         starters: Iterable[Node],
-        exposes: PortOrNode | tuple[PortOrNode, ...] | dict[str, PortOrNode] | None = None,
+        exposes: ExprOrNode | tuple[ExprOrNode, ...] | dict[str, ExprOrNode] | None = None,
         *,
         stub: Callable[P, R] | None = None
     ):
         self._starters = starters
-        self._expose: PortId | tuple[PortId, ...] | dict[str, PortId] | None = None
+        self._expose: Expr | tuple[Expr, ...] | dict[str, Expr] | None = None
         self._stub = stub
 
         if exposes is None:
             return
-        elif isinstance(exposes, (PortId, Node)):
+        elif isinstance(exposes, Node) or _expr.is_expr(exposes):
             self._expose = self._validate_port(exposes)
         elif isinstance(exposes, tuple):
             self._expose = tuple(map(self._validate_port, exposes))
@@ -96,46 +99,42 @@ class Graph[**P, R]:
                 f"got {type(exposes).__name__!r}."
             )
 
-    def input(self, index_or_key: Any = None, /) -> PortId:
-        return PortId(id(self), index_or_key)
+    def input(self, index_or_key: Any = None, /) -> Expr:
+        return _expr.subscription(id(self), index_or_key, owner=self)
 
-    def _validate_port(self, port: PortOrNode) -> PortId:
+    def _validate_port(self, port: ExprOrNode) -> Expr:
         if isinstance(port, Node):
-            return PortId(id(port), None)
-        elif isinstance(port, PortId):
+            return _expr.subscription(id(port), None, owner=port)
+        elif _expr.is_expr(port):
             return port
         else:
             raise TypeError(
-                f"Expected PortId or Node, got {type(single).__name__!r}."
+                f"Expected PortId or Node, got {type(port).__name__!r}."
             )
 
-    def _read_context(self, context: dict[int, Any], port_id: PortId, name: Any = None):
-        node_id, index = port_id
+    def _read_context(self, context: dict[int, Any], expr: Expr, expose_item: Any = None):
         try:
-            val = context[node_id]
-        except KeyError:
-            raise ExposedNotFoundError(self, name)
-
-        if index is not None:
-            val = val[index]
+            val = expr(context)
+        except _err.SubscribedNotFoundError as e:
+            raise _err.ExposedNotFoundError(self, expose_item) from e
 
         return val
 
     def _construct_output(self, context: dict[int, Any]) -> Any:
         # Get value for an input from the context.
-        if isinstance(self._expose, PortId):
+        if _expr.is_expr(self._expose):
             return self._read_context(context, self._expose)
 
         elif isinstance(self._expose, tuple):
             result = []
-            for index, port_id in enumerate(self._expose):
-                result.append(self._read_context(context, port_id))
+            for index, expr in enumerate(self._expose):
+                result.append(self._read_context(context, expr, index))
             return tuple(result)
 
         elif isinstance(self._expose, dict):
             result = {}
-            for key, port_id in self._expose.items():
-                result[key] = self._read_context(context, port_id)
+            for key, expr in self._expose.items():
+                result[key] = self._read_context(context, expr, key)
             return result
 
         return None

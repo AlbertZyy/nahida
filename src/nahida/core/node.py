@@ -1,7 +1,8 @@
+# nahida/core/node.py
+
 from __future__ import annotations
 
 __all__ = [
-    "PortId",
     "FlowCtrl",
     "TaskItem",
     "Node",
@@ -16,20 +17,16 @@ __all__ = [
 
 import inspect
 from inspect import _ParameterKind as PPK
-from typing import Any, overload, NamedTuple
+from typing import Any, overload
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from enum import StrEnum
 
-from .errors import *
+from . import errors as _err
+from . import expr as _expr
 
 
-class PortId(NamedTuple):
-    """Port ID for a node."""
-    node_id: int
-    index: int | str | None
-
-type PortOrNode = PortId | Node
+type ExprOrNode = _expr.Expr | Node
 
 
 class FlowCtrl(StrEnum):
@@ -146,62 +143,45 @@ class _ContextReader:
 
     Introduce `_values` and `_connects` dicts for defaults and subscriptions.
     """
-    _values: dict[str, Any]
-    _connects: dict[str, PortId]
+    _attributes: dict[str, _expr.Expr]
 
-    def __init__(self, **kwargs: PortOrNode | Any):
-        self._values = {}
-        self._connects = {}
+    def __init__(self, **kwargs: ExprOrNode | Any):
+        self._attributes = {}
         self.subs(**kwargs)
 
-    def __getitem__(self, key: str | int) -> PortId:
-        return PortId(id(self), key)
+    def __getitem__(self, key: str | int) -> _expr.Expr:
+        return _expr.subscription(id(self), key, owner=self)
 
-    def subs(self, **kwargs: PortOrNode | Any) -> None:
+    def subs(self, **kwargs: ExprOrNode | Any) -> None:
         """Set subscriptions for attributes.
 
         An attribute may take values from other nodes or constants. Use pairs
-        like `arg1=node` or `arg1=value` to define the souce of the attribute
-        named `arg1`. Use `arg1=node[index]` for source nodes returning a
+        like `arg=node` or `arg=value` to define the souce of the attribute
+        named `arg`. Use `arg=node[index]` for source nodes returning a
         tuple, list, dict or any other types that supports __getitem__.
 
         Args:
             **kwargs (PortId | Node | Any): The attribute-source pairs.
         """
         for name, value in kwargs.items():
-            if isinstance(value, PortId):
-                self._connects[name] = value
+            if _expr.is_expr(value):
+                self._attributes[name] = value
             elif isinstance(value, Node):
-                self._connects[name] = PortId(id(value), None)
+                self._attributes[name] = _expr.subscription(
+                    id(value), None, owner=value
+                )
             else:
-                self._values[name] = value
+                self._attributes[name] = _expr.constant(value)
 
     def unsubs(self, *names: str) -> None:
         """Remove subscriptions for attributes."""
         for name in names:
-            self._values.pop(name, None)
-            self._connects.pop(name, None)
+            self._attributes.pop(name, None)
 
     def read_context(self, context: dict[int, Any], name: str) -> tuple[Any, bool]:
         """Get value for an input from the context."""
-        if name in self._connects:
-            node_id, index = self._connects[name]
-
-            if node_id in context:
-                val = context[node_id]
-
-                if index is not None:
-                    try:
-                        val = val[index]
-                    except (KeyError, IndexError) as e:
-                        raise DataGetItemError(self, name, index) from e
-
-                return val, True
-
-            raise SubscribedNotFoundError(self, name)
-
-        if name in self._values:
-            return self._values[name], True
+        if name in self._attributes:
+            return self._attributes[name](context), True
 
         return None, False
 
@@ -266,7 +246,7 @@ class Execute(_Recruiter, _ContextReader, NamedNode):
                 continue
             if has_default:
                 continue
-            raise ParamMissingError(self, param)
+            raise _err.ParamMissingError(self, param)
 
         return TaskItem(
             target=self._target,
@@ -280,7 +260,7 @@ class Branch(_ContextReader, NamedNode):
     _downstreams_true: set[Node]
     _downstreams_false: set[Node]
 
-    def __init__(self, condition: PortOrNode | bool = False, /, *, uname: Any = None) -> None:
+    def __init__(self, condition: ExprOrNode | bool = False, /, *, uname: Any = None) -> None:
         NamedNode.__init__(self, uname=uname)
         _ContextReader.__init__(self, condition=condition)
         self._downstreams_true = set()
@@ -308,9 +288,9 @@ class Branch(_ContextReader, NamedNode):
 class Repeat(_Recruiter, _ContextReader, NamedNode):
     """Repeat the execution for multiple times."""
     @overload
-    def __init__(self, stop: int | PortOrNode = 1, /, *, uname: Any = None) -> None: ...
+    def __init__(self, stop: int | ExprOrNode = 1, /, *, uname: Any = None) -> None: ...
     @overload
-    def __init__(self, start: int | PortOrNode, stop: int | PortOrNode, step: int | PortOrNode = 1, /, *, uname: Any = None) -> None: ...
+    def __init__(self, start: int | ExprOrNode, stop: int | ExprOrNode, step: int | ExprOrNode = 1, /, *, uname: Any = None) -> None: ...
     def __init__(self, *args, uname: Any = None) -> None:
         if len(args) == 0:
             start, stop, step = 0, 1, 1
@@ -397,7 +377,7 @@ class Group(_Recruiter, _ContextReader, NamedNode):
         self._graph = graph
 
     def submit(self, context: dict[int, Any] = {}) -> TaskItem:
-        param_set = set(self._connects.keys()) & set(self._values.keys())
+        param_set = set(self._attributes.keys())
         kwargs: dict[str, Any] = {}
 
         for param in param_set:
