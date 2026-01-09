@@ -225,7 +225,7 @@ class _Recruiter:
         Args:
             *other (Node): The downstream nodes to be added.
         """
-        self._downstreams.union(other)
+        self._downstreams.update(other)
 
     def unlink(self, *other: Node) -> None:
         """Remove downstream nodes. Do nothing for non-existent nodes.

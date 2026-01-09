@@ -71,7 +71,7 @@ class Graph[**P, R]:
     def __init__(
         self,
         starters: Iterable[Node],
-        exposes: PortOrNode | tuple[PortOrNode] | dict[str, PortOrNode] | None = None,
+        exposes: PortOrNode | tuple[PortOrNode, ...] | dict[str, PortOrNode] | None = None,
         *,
         stub: Callable[P, R] | None = None
     ):
