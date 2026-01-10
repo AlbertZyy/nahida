@@ -149,8 +149,14 @@ class _ContextReader:
         self._attributes = {}
         self.subs(**kwargs)
 
-    def __getitem__(self, key: str | int) -> _expr.Expr:
-        return _expr.subscription(id(self), key, owner=self)
+    def __getitem__(self, key: str | int | slice) -> _expr.Expr:
+        if key == slice(None):
+            return _expr.subscription(id(self), None)
+        elif isinstance(key, (str, int)):
+            return _expr.subscription(id(self), key)
+        else:
+            raise TypeError("only supports int, str and slice(None) for "
+                            f"node subscription, got {type(key).__name__}")
 
     def subs(self, **kwargs: ExprOrNode | Any) -> None:
         """Set subscriptions for attributes.
@@ -167,9 +173,7 @@ class _ContextReader:
             if _expr.is_expr(value):
                 self._attributes[name] = value
             elif isinstance(value, Node):
-                self._attributes[name] = _expr.subscription(
-                    id(value), None, owner=value
-                )
+                self._attributes[name] = _expr.subscription(id(value), None)
             else:
                 self._attributes[name] = _expr.constant(value)
 
@@ -181,7 +185,10 @@ class _ContextReader:
     def read_context(self, context: dict[int, Any], name: str) -> tuple[Any, bool]:
         """Get value for an input from the context."""
         if name in self._attributes:
-            return self._attributes[name](context), True
+            try:
+                return self._attributes[name](context), True
+            except Exception as e:
+                raise _err.SubscribeError(self, name) from e
 
         return None, False
 
@@ -384,7 +391,7 @@ class Group(_Recruiter, _ContextReader, NamedNode):
             kwargs[param] = self.read_context(context, param)[0]
 
         return TaskItem(
-            target=self._graph.forward,
+            target=self._graph.run,
             kwargs=kwargs,
             recruit=self.downstreams
         )

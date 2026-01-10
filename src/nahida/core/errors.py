@@ -1,9 +1,11 @@
 
 __all__ = [
-    "SubscribedNotFoundError",
-    "ExposedNotFoundError",
+    "DataNotFoundError",
     "DataGetItemError",
+    "UnionError",
     "ExprEvalError",
+    "SubscribeError",
+    "ExposingError",
     "ParamMissingError",
     "CircularRecruitmentError",
     "TaskFailedError"
@@ -19,7 +21,7 @@ def _make_node_name(node: Any) -> str:
         return repr(node)
 
 
-class BaseException(Exception):
+class NBaseException(Exception):
     ERROR_CODE = "UNKNOWN"
 
     def __init__(self, message: str = "", context: tuple[Any, ...] = ()) -> None:
@@ -35,16 +37,53 @@ class BaseException(Exception):
         }
 
 
-class SubscribedNotFoundError(BaseException):
+## In expressions
+
+class DataNotFoundError(NBaseException):
     """Raised when a subscribed data not found in the context."""
-    ERROR_CODE = "SCHEDULING_ERROR.SUBSCRIBED_NOTFOUND"
+    ERROR_CODE = "SCHEDULING_ERROR.DATA_NOTFOUND"
+    def __init__(self, ctx_id: int) -> None:
+        message = "key {} not found in the context; check execution order".format(ctx_id)
+        super().__init__(message, (ctx_id,))
+
+
+class DataGetItemError(NBaseException):
+    """Raised when `KeyError` or `IndexError` is raised in any result subscription."""
+    ERROR_CODE = "SCHEDULING_ERROR.DATA_GETITEM_FAILED"
     def __init__(self, node: Any, output_item: Any) -> None:
         node_name = _make_node_name(node)
-        message = "result of index {!r} in node {!r} cannot be found in the context; check execution order".format(node_name, output_item)
+        message = "data of key {!r} does not supports getitem by {!r}".format(node_name, output_item)
         super().__init__(message, (node_name, output_item))
 
 
-class ExposedNotFoundError(BaseException):
+class UnionError(NBaseException):
+    """Raised when failed to evaluate any union member expression."""
+    ERROR_CODE = "SCHEDULING_ERROR.UNION_FAILED"
+    def __init__(self) -> None:
+        message = "failed to evaluate any of the union members"
+        super().__init__(message, ())
+
+
+class ExprEvalError(NBaseException):
+    """Raised when expression evaluation failed."""
+    ERROR_CODE = "SCHEDULING_ERROR.EXPRESSION_FAILED"
+    def __init__(self) -> None:
+        message = "failed to evaluate the expression"
+        super().__init__(message, ())
+
+
+## In nodes/graphs
+
+class SubscribeError(NBaseException):
+    """Raised when a node failed to fetch the subscribed data at runtime."""
+    ERROR_CODE = "SCHEDULING_ERROR.SUBSCRIPTION_FAILED"
+    def __init__(self, node: Any, attr_name: Any) -> None:
+        node_name = _make_node_name(node)
+        message = "failed to fetch data for attribute {!r} of {!r}".format(attr_name, node_name)
+        super().__init__(message, (node_name, attr_name))
+
+
+class ExposingError(NBaseException):
     """Raised when a exposed data of a graph not found in the context."""
     ERROR_CODE = "SCHEDULING_ERROR.EXPOSED_NOTFOUND"
     def __init__(self, graph: Any, expose_item: Any = None) -> None:
@@ -56,25 +95,7 @@ class ExposedNotFoundError(BaseException):
         super().__init__(message, (graph_name, expose_item))
 
 
-class DataGetItemError(BaseException):
-    """Raised when `KeyError` or `IndexError` is raised in any result subscription."""
-    ERROR_CODE = "SCHEDULING_ERROR.GETITEM_FAILED"
-    def __init__(self, node: Any, output_item: Any) -> None:
-        node_name = _make_node_name(node)
-        message = "result of node {!r} does not supports getitem by {!r}".format(node_name, output_item)
-        super().__init__(message, (node_name, output_item))
-
-
-class ExprEvalError(BaseException):
-    """Raised when expression evaluation failed."""
-    ERROR_CODE = "SCHEDULING_ERROR.EXPRESSION_FAILED"
-    def __init__(self, node: Any, attr: Any) -> None:
-        node_name = _make_node_name(node)
-        message = "the attribute {!r} in {!r} failed to evaluate its expression".format(node_name, attr)
-        super().__init__(message, (node_name, attr))
-
-
-class ParamMissingError(BaseException):
+class ParamMissingError(NBaseException):
     """Riased from `Execute` node, when any param required by the internal
     function was not specified (subscription or default value)."""
     ERROR_CODE = "SCHEDULING_ERROR.PARAM_MISSING"
@@ -84,7 +105,7 @@ class ParamMissingError(BaseException):
         super().__init__(message, (node_name, param))
 
 
-class CircularRecruitmentError(BaseException):
+class CircularRecruitmentError(NBaseException):
     """Raised when circular recruitment occurs."""
     ERROR_CODE = "SCHEDULING_ERROR.CIRCULAR_RECRUITMENT"
     def __init__(self, node: Any, next_node: Any) -> None:
@@ -94,7 +115,7 @@ class CircularRecruitmentError(BaseException):
         super().__init__(message, (node_name, next_node_name))
 
 
-class TaskFailedError(BaseException):
+class TaskFailedError(NBaseException):
     """Raised when a submitted task raises an exception."""
     ERROR_CODE = "EXECUTION_ERROR.TASK_FAILED"
     def __init__(self, node: Any) -> None:

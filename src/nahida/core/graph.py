@@ -2,6 +2,7 @@
 
 __all__ = [
     "execute",
+    "gin",
     "Graph",
     "GraphThread"
 ]
@@ -16,6 +17,8 @@ from .import errors as _err
 from .node import Node, FlowCtrl as _FC, ExprOrNode
 
 Expr = _expr.Expr
+GRAPH_CTX_ID = -1
+type ForwardFunc = Callable[[dict[int, Any], Iterable[Node]], dict[int, Any]]
 
 
 def execute(
@@ -70,17 +73,29 @@ def execute(
     return context
 
 
-class Graph[**P, R]:
+def gin(index_or_key: Any = None, /) -> Expr:
+    """Return an expression subscribing attributes from graph inputs."""
+    return _expr.subscription(GRAPH_CTX_ID, index_or_key)
+
+
+class Graph:
+    """General computational node graph."""
     def __init__(
         self,
         starters: Iterable[Node],
         exposes: ExprOrNode | tuple[ExprOrNode, ...] | dict[str, ExprOrNode] | None = None,
         *,
-        stub: Callable[P, R] | None = None
+        gname: str | None = None
     ):
+        """
+        Args:
+            starters (Iterable of Node): The root nodes for execution.
+            exposes (Node, Expr, tuple, dict): Subscribed for outputs.
+            gname (str | None): Name for the graph.
+        """
         self._starters = starters
         self._expose: Expr | tuple[Expr, ...] | dict[str, Expr] | None = None
-        self._stub = stub
+        self._gname = gname
 
         if exposes is None:
             return
@@ -99,12 +114,23 @@ class Graph[**P, R]:
                 f"got {type(exposes).__name__!r}."
             )
 
-    def input(self, index_or_key: Any = None, /) -> Expr:
-        return _expr.subscription(id(self), index_or_key, owner=self)
+    def __repr__(self) -> str:
+        type_name = self.__class__.__name__
+
+        if self._gname:
+            return "{}({})".format(type_name, self._gname)
+
+        return "<graph {} at {}>".format(type_name, hex(id(self)))
+
+    @property
+    def __name__(self) -> str:
+        if self._gname:
+            return self._gname
+        return repr(self)
 
     def _validate_port(self, port: ExprOrNode) -> Expr:
         if isinstance(port, Node):
-            return _expr.subscription(id(port), None, owner=port)
+            return _expr.subscription(id(port), None)
         elif _expr.is_expr(port):
             return port
         else:
@@ -115,8 +141,8 @@ class Graph[**P, R]:
     def _read_context(self, context: dict[int, Any], expr: Expr, expose_item: Any = None):
         try:
             val = expr(context)
-        except _err.SubscribedNotFoundError as e:
-            raise _err.ExposedNotFoundError(self, expose_item) from e
+        except Exception as e:
+            raise _err.ExposingError(self, expose_item) from e
 
         return val
 
@@ -139,16 +165,23 @@ class Graph[**P, R]:
 
         return None
 
-    def forward(self, *args: P.args, **kwargs: P.kwargs) -> R:
+    def run(
+        self,
+        args: tuple[Any, ...],
+        kwargs: dict[str, Any],
+        *,
+        forward: ForwardFunc | None = None
+    ):
         if args or kwargs:
             initial: dict[int | str, Any] = {}
             initial.update(enumerate(args))
             initial.update(kwargs)
-            context = {id(self): initial}
+            context = {GRAPH_CTX_ID: initial}
         else:
             context = {}
 
-        context = execute(context, self._starters)
+        _forward = forward or execute
+        context = _forward(context, self._starters)
         return self._construct_output(context)
 
 

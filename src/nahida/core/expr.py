@@ -15,20 +15,25 @@ def is_expr(obj: Any, /) -> TypeGuard[Expr]:
     return isinstance(flag, bool) and flag and callable(obj)
 
 
-def constant(value: Any) -> Expr:
-    def wrapped(context: dict[int, Any], /):
+def constant(value: Any, /) -> Expr:
+    """Construct a constant expression."""
+    def expr_func(context: dict[int, Any], /):
         return value
-    wrapped.__expression__ = True
-    return wrapped
+    expr_func.__expression__ = True
+    return expr_func
 
 
 def subscription(
     ctx_id: int,
     index: int | str | None = None,
-    *,
-    owner: Any = None
 ) -> Expr:
-    def wrapped(context: dict[int, Any], /):
+    """Construct an expression subscribing values from context.
+
+    The expression raises:
+        - *DataNotFoundError*: when `ctx_id` was not in context;
+        - *DataGetItemError*: when `data[index]` failed.
+    """
+    def expr_func(context: dict[int, Any], /):
         if ctx_id in context:
             val = context[ctx_id]
 
@@ -36,29 +41,59 @@ def subscription(
                 try:
                     val = val[index]
                 except (KeyError, IndexError) as e:
-                    raise _err.DataGetItemError(owner, index) from e
+                    raise _err.DataGetItemError(ctx_id, index) from e
 
             return val
 
-        raise _err.SubscribedNotFoundError(owner, index)
-    wrapped.__expression__ = True
+        raise _err.DataNotFoundError(ctx_id)
+    expr_func.__expression__ = True
 
-    return wrapped
+    return expr_func
+
+
+def union(*exprs: Expr) -> Expr:
+    """Construct an expression returning the first value that was successfully
+    evaluated.
+
+    The expression raises:
+        - *UnionError*: after all failed.
+    """
+    def expr_func(context: dict[int, Any], /):
+        for expr in exprs:
+            try:
+                return expr(context)
+            except (
+                _err.DataNotFoundError,
+                _err.DataGetItemError,
+                _err.ExprEvalError
+            ):
+                continue
+
+        raise _err.UnionError()
+    expr_func.__expression__ = True
+
+    return expr_func
 
 
 def formula(
     source: str,
     attributes: dict[str, Expr],
-    *,
-    owner: Any = None,
-    attr_name: Any = None
 ) -> Expr:
-    def wrapped(context: dict[int, Any], /):
+    """Construct an expression of the given formula.
+
+    The expression raises:
+        - *ExprEvalError*: when evaluation failed.
+
+    Args:
+        source (str): Python expression.
+        attributes (dict[str, Expr]): values for variables in the source.
+    """
+    def expr_func(context: dict[int, Any], /):
         local_vars = {name: func(context) for name, func in attributes.items()}
         try:
             return eval(source, {}, local_vars)
         except Exception as e:
-            raise _err.ExprEvalError(owner, attr_name) from e
-    wrapped.__expression__ = True
+            raise _err.ExprEvalError() from e
+    expr_func.__expression__ = True
 
-    return wrapped
+    return expr_func
