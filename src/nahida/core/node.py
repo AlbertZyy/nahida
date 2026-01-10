@@ -292,13 +292,52 @@ class Branch(_ContextReader, NamedNode):
             return TaskItem(recruit=self._downstreams_false)
 
 
-class Repeat(_Recruiter, _ContextReader, NamedNode):
+class Repeat(_ContextReader, NamedNode):
     """Repeat the execution for multiple times."""
+    def __init__(self, iterable: ExprOrNode | Iterable[Any] | None = None, *, uname: Any = None) -> None:
+        NamedNode.__init__(self, uname=uname)
+        _ContextReader.__init__(self, iterable=iterable)
+        self._downstreams_iter: set[Node] = set()
+        self._downstreams_stop: set[Node] = set()
+        self._iterator = None
+
+    @property
+    def iter(self):
+        """Execute downstream nodes repeatedly."""
+        return _Recruiter(self._downstreams_iter)
+
+    @property
+    def stop(self):
+        """Execute downstream nodes when the loop is stopped."""
+        return _Recruiter(self._downstreams_stop)
+
+    def submit(self, context: dict[int, Any] = {}):
+        if self._iterator is None:
+            iterable = self.read_context(context, "iterable")[0]
+            self._iterator = iter(iterable)
+        try:
+            current = next(self._iterator)
+        except StopIteration:
+            self._iterator = None
+            return TaskItem(
+                recruit=self._downstreams_stop,
+                control=FlowCtrl.NONE
+            )
+        self.write(context, (current,))
+
+        return TaskItem(
+            recruit=self._downstreams_iter,
+            control=FlowCtrl.REPEAT
+        )
+
     @overload
-    def __init__(self, stop: int | ExprOrNode = 1, /, *, uname: Any = None) -> None: ...
+    @classmethod
+    def from_range(cls, stop: int | ExprOrNode = 1, /, *, uname: Any = None) -> Repeat: ...
     @overload
-    def __init__(self, start: int | ExprOrNode, stop: int | ExprOrNode, step: int | ExprOrNode = 1, /, *, uname: Any = None) -> None: ...
-    def __init__(self, *args, uname: Any = None) -> None:
+    @classmethod
+    def from_range(cls, start: int | ExprOrNode, stop: int | ExprOrNode, step: int | ExprOrNode = 1, /, *, uname: Any = None) -> Repeat: ...
+    @classmethod
+    def from_range(cls, *args, uname: Any = None) -> Repeat:
         if len(args) == 0:
             start, stop, step = 0, 1, 1
         elif len(args) == 1:
@@ -309,38 +348,11 @@ class Repeat(_Recruiter, _ContextReader, NamedNode):
             start, stop, step = args
         else:
             raise TypeError("Invalid arguments")
-
-        NamedNode.__init__(self, uname=uname)
-        _ContextReader.__init__(self, start=start, stop=stop, step=step)
-        _Recruiter.__init__(self)
-        self._iterator = None
-        self._downstreams_stop: set[Node] = set()
-
-    @property
-    def stop(self):
-        """Execute downstream nodes when the loop is stopped."""
-        return _Recruiter(self._downstreams_stop)
-
-    def submit(self, context: dict[int, Any] = {}):
-        if self._iterator is None:
-            start = self.read_context(context, "start")[0]
-            stop = self.read_context(context, "stop")[0]
-            step = self.read_context(context, "step")[0]
-            self._iterator = iter(range(start, stop, step))
-        try:
-            current = next(self._iterator)
-        except StopIteration:
-            self._iterator = None
-            return TaskItem(
-                recruit=self._downstreams_stop,
-                control=FlowCtrl.NONE
-            )
-
-        self.write(context, (current,))
-        return TaskItem(
-            recruit=self.downstreams,
-            control=FlowCtrl.REPEAT
+        range_expr = _expr.formula(
+            "range(start, stop, step)",
+            start=start, stop=stop, step=step
         )
+        return cls(range_expr, uname=uname)
 
 
 class Break(NamedNode):

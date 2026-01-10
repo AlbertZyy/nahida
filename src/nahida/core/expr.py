@@ -77,7 +77,7 @@ def union(*exprs: Expr) -> Expr:
 
 def formula(
     source: str,
-    attributes: dict[str, Expr],
+    **attributes: Expr | Any,
 ) -> Expr:
     """Construct an expression of the given formula.
 
@@ -86,10 +86,15 @@ def formula(
 
     Args:
         source (str): Python expression.
-        attributes (dict[str, Expr]): values for variables in the source.
+        **attributes (dict[str, Expr]): values for variables in the source.
     """
     def expr_func(context: dict[int, Any], /):
-        local_vars = {name: func(context) for name, func in attributes.items()}
+        local_vars: dict[str, Any] = {}
+        for name, value in attributes.items():
+            if is_expr(value):
+                local_vars[name] = value(context)
+            else:
+                local_vars[name] = value
         try:
             return eval(source, {}, local_vars)
         except Exception as e:

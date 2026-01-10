@@ -10,7 +10,7 @@ __all__ = [
 from threading import Thread
 from queue import Queue
 from typing import Any
-from collections.abc import Iterable, Callable
+from collections.abc import Sequence, Callable
 
 from .import expr as _expr
 from .import errors as _err
@@ -18,17 +18,17 @@ from .node import Node, FlowCtrl as _FC, ExprOrNode
 
 Expr = _expr.Expr
 GRAPH_CTX_ID = -1
-type ForwardFunc = Callable[[dict[int, Any], Iterable[Node]], dict[int, Any]]
+type ForwardFunc = Callable[[dict[int, Any], Sequence[Node]], dict[int, Any]]
 
 
 def execute(
-    context: dict[int, Any], starters: Iterable[Node]
+    context: dict[int, Any], starters: Sequence[Node]
 ) -> dict[int, Any]:
     """Execute nodes with given inputs.
 
     Args:
         context (dict[int, Any]): Running context.
-        starters (Iterable[Node]): The starting nodes to execute.
+        starters (Sequence of Node): The starting nodes to execute.
 
     Returns:
         dict: The remaining context, mapping from PortId to their values.
@@ -55,6 +55,7 @@ def execute(
 
         if task.control == _FC.REPEAT:
             exec_stack.append(node)
+            trace_stack.append(trace)
             loop_stack.append(node)
         elif task.control == _FC.BREAK:
             breaking = True
@@ -82,7 +83,7 @@ class Graph:
     """General computational node graph."""
     def __init__(
         self,
-        starters: Iterable[Node],
+        starters: Sequence[Node],
         exposes: ExprOrNode | tuple[ExprOrNode, ...] | dict[str, ExprOrNode] | None = None,
         *,
         gname: str | None = None
@@ -167,8 +168,8 @@ class Graph:
 
     def run(
         self,
-        args: tuple[Any, ...],
-        kwargs: dict[str, Any],
+        args: tuple[Any, ...] = (),
+        kwargs: dict[str, Any] = {},
         *,
         forward: ForwardFunc | None = None
     ):

@@ -26,9 +26,8 @@ def _clone_levels(levels: list[NodeExecLevel]) -> list[NodeExecLevel]:
     return list(levels)
 
 def _set_top(levels: list[NodeExecLevel], new_top: NodeExecLevel) -> list[NodeExecLevel]:
-    out = list(levels)
-    out[-1] = new_top
-    return out
+    levels[-1] = new_top
+    return levels
 
 
 class Scheduler:
@@ -43,7 +42,7 @@ class Scheduler:
         self.executor = executor
         self.max_inflight = max_inflight
 
-    def forward(self, context: dict[int, Any], starters: Sequence[Node]) -> None:
+    def forward(self, context: dict[int, Any], starters: Sequence[Node]) -> dict[int, Any]:
         """Forward computation of a node graph.
 
         Args:
@@ -90,6 +89,8 @@ class Scheduler:
                 node.write(context, results)
                 Scheduler._schedule(ready, task_item, node, levels)
 
+        return context
+
     @staticmethod
     def _schedule(
         ready: deque[tuple[Node, list[NodeExecLevel]]],
@@ -97,16 +98,10 @@ class Scheduler:
         node: Node,
         levels: list[NodeExecLevel]
     ):
-        if task_item.recruit:
-            top = levels[-1]
-            levels = _set_top(levels, replace(top, count=top.count + len(task_item.recruit)))
-            for nxt in task_item.recruit:
-                ready.append((nxt, _clone_levels(levels)))
-
         if task_item.control == FlowCtrl.REPEAT:
-            # start a new level of loop
+            # start a new level of loop, the old top is covered
             levels = _clone_levels(levels)
-            levels.append(NodeExecLevel(count=1, exiter=node))
+            levels.append(NodeExecLevel(count=0, exiter=node))
 
         elif task_item.control == FlowCtrl.BREAK:
             top = levels[-1]
@@ -118,6 +113,13 @@ class Scheduler:
 
         else:
             raise ValueError(f"Invalid control flow: {task_item.control!r}")
+
+        if task_item.recruit:
+            top = levels[-1]
+            levels = _set_top(levels, replace(top, count=top.count + len(task_item.recruit)))
+            for nxt in task_item.recruit:
+                # NOTE: nodes in the same level share one level stack, thus no copy here
+                ready.append((nxt, levels))
 
         while levels and levels[-1].count < 1:
             exhausted = levels[-1]
