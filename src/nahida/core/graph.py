@@ -1,7 +1,8 @@
+# nahida/core/graph.py
 
 __all__ = [
-    "CircularRecruitmentError",
     "execute",
+    "gin",
     "Graph",
     "GraphThread"
 ]
@@ -9,23 +10,25 @@ __all__ = [
 from threading import Thread
 from queue import Queue
 from typing import Any
-from collections.abc import Iterable
+from collections.abc import Sequence, Callable
 
-from .node import Node, PortId, FlowCtrl as _FC
+from .import expr as _expr
+from .import errors as _err
+from .node import Node, FlowCtrl as _FC, ExprOrNode
 
-
-class CircularRecruitmentError(Exception):
-    """Raised when circular recruitment occurs."""
+Expr = _expr.Expr
+GRAPH_CTX_ID = -1
+type ForwardFunc = Callable[[dict[int, Any], Sequence[Node]], dict[int, Any]]
 
 
 def execute(
-    context: dict[int, Any], starters: Iterable[Node]
+    context: dict[int, Any], starters: Sequence[Node]
 ) -> dict[int, Any]:
     """Execute nodes with given inputs.
 
     Args:
         context (dict[int, Any]): Running context.
-        starters (Iterable[Node]): The starting nodes to execute.
+        starters (Sequence of Node): The starting nodes to execute.
 
     Returns:
         dict: The remaining context, mapping from PortId to their values.
@@ -50,10 +53,11 @@ def execute(
             result = task.target(*task.args, **task.kwargs)
             node.write(context, result)
 
-        if task.control == _FC.REPEAT:
+        if task.control == _FC.ENTER:
             exec_stack.append(node)
+            trace_stack.append(trace)
             loop_stack.append(node)
-        elif task.control == _FC.BREAK:
+        elif task.control == _FC.EXIT:
             breaking = True
 
         if task.recruit is None:
@@ -62,10 +66,7 @@ def execute(
         for next_node in task.recruit:
             next_id = id(next_node)
             if next_id in trace:
-                raise CircularRecruitmentError(
-                    f"{node!r} wants to recruit {next_node!r} that exists "
-                    "in the execution path."
-                )
+                raise _err.CircularRecruitmentError(node, next_node)
 
             exec_stack.append(next_node)
             trace_stack.append(trace | {next_id})
@@ -73,52 +74,116 @@ def execute(
     return context
 
 
+def gin(index_or_key: Any = None, /) -> Expr:
+    """Return an expression subscribing attributes from graph inputs."""
+    return _expr.subscription(GRAPH_CTX_ID, index_or_key)
+
+
 class Graph:
-    def __init__(self, starters: Iterable[Node]):
-        self.starters = starters
-        self.connects: dict[str, PortId] = {}
+    """General computational node graph."""
+    def __init__(
+        self,
+        starters: Sequence[Node],
+        exposes: ExprOrNode | tuple[ExprOrNode, ...] | dict[str, ExprOrNode] | None = None,
+        *,
+        gname: str | None = None
+    ):
+        """
+        Args:
+            starters (Iterable of Node): The root nodes for execution.
+            exposes (Node, Expr, tuple, dict): Subscribed for outputs.
+            gname (str | None): Name for the graph.
+        """
+        self._starters = starters
+        self._expose: Expr | tuple[Expr, ...] | dict[str, Expr] | None = None
+        self._gname = gname
 
-    def __getitem__(self, item: Any):
-        return PortId(self, item)
+        if exposes is None:
+            return
+        elif isinstance(exposes, Node) or _expr.is_expr(exposes):
+            self._expose = self._validate_port(exposes)
+        elif isinstance(exposes, tuple):
+            self._expose = tuple(map(self._validate_port, exposes))
+        elif isinstance(exposes, dict):
+            self._expose = {
+                key: self._validate_port(value)
+                for key, value in exposes.items()
+            }
+        else:
+            raise TypeError(
+                "Expected PortId, Node, tuple, dict, or None, "
+                f"got {type(exposes).__name__!r}."
+            )
 
-    def __call__(self, **kwargs: PortId):
-        for name, value in kwargs.items():
-            if isinstance(value, PortId):
-                self.connects[name] = value
-            else:
-                raise TypeError(
-                    f"Graph output {name!r} must connect to a PortId, "
-                    f"got {type(value).__name__!r}."
-                )
+    def __repr__(self) -> str:
+        type_name = self.__class__.__name__
 
-    def read_value(self, context: dict[int, Any], name: str) -> tuple[Any, bool]:
-        """Get value for an input from the context."""
-        if name in self.connects:
-            node_id, index = self.connects[name]
-            if node_id in context:
-                val = context[node_id]
-                if index is not None:
-                    val = val[index]
-                return val, True
+        if self._gname:
+            return "{}({})".format(type_name, self._gname)
 
-        return None, False
+        return "<graph {} at {}>".format(type_name, hex(id(self)))
 
-    def forward(self, **kwargs: Any) -> dict[str, Any]:
-        context = {id(self): kwargs}
-        context = execute(context, self.starters)
-        results: dict[str, Any] = {}
+    @property
+    def __name__(self) -> str:
+        if self._gname:
+            return self._gname
+        return repr(self)
 
-        for key in self.connects:
-            val, status = self.read_value(context, key)
+    def _validate_port(self, port: ExprOrNode) -> Expr:
+        if isinstance(port, Node):
+            return _expr.subscription(id(port), None)
+        elif _expr.is_expr(port):
+            return port
+        else:
+            raise TypeError(
+                f"Expected PortId or Node, got {type(port).__name__!r}."
+            )
 
-            if not status:
-                raise RuntimeError(
-                    f"Output '{key}' not found in graph execution context."
-                )
+    def _read_context(self, context: dict[int, Any], expr: Expr, expose_item: Any = None):
+        try:
+            val = expr(context)
+        except Exception as e:
+            raise _err.ExposingError(self, expose_item) from e
 
-            results[key] = val
+        return val
 
-        return results
+    def _construct_output(self, context: dict[int, Any]) -> Any:
+        # Get value for an input from the context.
+        if _expr.is_expr(self._expose):
+            return self._read_context(context, self._expose)
+
+        elif isinstance(self._expose, tuple):
+            result = []
+            for index, expr in enumerate(self._expose):
+                result.append(self._read_context(context, expr, index))
+            return tuple(result)
+
+        elif isinstance(self._expose, dict):
+            result = {}
+            for key, expr in self._expose.items():
+                result[key] = self._read_context(context, expr, key)
+            return result
+
+        return None
+
+    def run(
+        self,
+        args: tuple[Any, ...] = (),
+        kwargs: dict[str, Any] = {},
+        *,
+        forward: ForwardFunc | None = None
+    ):
+        if args or kwargs:
+            initial: dict[int | str, Any] = {}
+            initial.update(enumerate(args))
+            initial.update(kwargs)
+            context = {GRAPH_CTX_ID: initial}
+        else:
+            context = {}
+
+        _forward = forward or execute
+        context = _forward(context, self._starters)
+        return self._construct_output(context)
 
 
 class GraphThread(Thread):

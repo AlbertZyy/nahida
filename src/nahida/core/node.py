@@ -1,14 +1,12 @@
+# nahida/core/node.py
+
 from __future__ import annotations
 
 __all__ = [
-    "PortId",
+    "FlowCtrl",
     "TaskItem",
-    "InputDataNotFoundError",
-    "InputMissingError",
-    "NodeExceptionError",
-    "OutputLengthMismatchError",
-    "DataAlreadyExistError",
     "Node",
+    "NamedNode",
     "Execute",
     "Branch",
     "Repeat",
@@ -20,28 +18,28 @@ __all__ = [
 import inspect
 from inspect import _ParameterKind as PPK
 from typing import Any, overload
-from collections.abc import Callable, Iterable, Sequence
-from collections import namedtuple
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from enum import StrEnum
 
+from . import errors as _err
+from . import expr as _expr
 
-PortId = namedtuple("PortId", ["node_id", "index"])
-"""Port identifier."""
+
+type ExprOrNode = _expr.Expr | Node
 
 
 class FlowCtrl(StrEnum):
     """Workflow control instruction after execution."""
 
     NONE = "none"
-    """Do nothing and be poped from the stack top."""
+    """Do nothing and be removed from the tasks."""
 
-    REPEAT = "repeat"
-    """Require to be re-pushed into the computation stack."""
+    ENTER = "enter"
+    """Require a new scope for downstreams."""
 
-    BREAK = "break"
-    """Require to pop the nearest re-pushed node directly (no execution)
-    when the next time it is on the top."""
+    EXIT = "exit"
+    """Require cancel the current scope."""
 
 
 @dataclass(slots=True, frozen=True)
@@ -53,29 +51,8 @@ class TaskItem:
     target: Callable | None = None
     args: tuple[Any, ...] = field(default_factory=tuple)
     kwargs: dict[str, Any] = field(default_factory=dict)
-    recruit: Sequence[Node] | None = None
+    recruit: set[Node] | None = None
     control: FlowCtrl = FlowCtrl.NONE
-
-
-class InputDataNotFoundError(Exception):
-    """Raised when connected input data cannot be found in the context."""
-
-
-class InputMissingError(Exception):
-    """Raised when any required input is missing."""
-
-
-class NodeExceptionError(Exception):
-    """Raised when an error occurs in the node's exception handling."""
-
-
-class OutputLengthMismatchError(Exception):
-    """Raised when number of outputs does not match the number of function
-    return _values."""
-
-
-class DataAlreadyExistError(Exception):
-    """Raised when output data already exist in the context."""
 
 
 class Node(object):
@@ -121,6 +98,10 @@ class Node(object):
         """
         context[id(self)] = values
 
+    def __repr__(self) -> str:
+        type_name = self.__class__.__name__
+        return "<{} node at {}>".format(type_name, hex(id(self)))
+
 
 def get_inputs(func: Callable) -> Iterable[tuple[str, Any, bool]]:
     """Return the node's input names and defaults."""
@@ -134,92 +115,132 @@ def get_inputs(func: Callable) -> Iterable[tuple[str, Any, bool]]:
             raise TypeError("Positional-only parameters are not supported")
 
 
+class NamedNode(Node):
+    """Nodes support unique names as the keys."""
+
+    def __init__(self, *, uname: Any = None) -> None:
+        self.uname = uname
+
+    def __repr__(self) -> str:
+        type_name = self.__class__.__name__
+
+        if self.uname:
+            return "{}({})".format(type_name, self.uname)
+
+        return super().__repr__()
+
+    @property
+    def __name__(self):
+        if self.uname:
+            return self.uname
+
+        return super().__repr__()
+
+
 class _ContextReader:
     """Supports read_context in a node.
 
     Introduce `_values` and `_connects` dicts for defaults and subscriptions.
-    __call__ is available for any subscription to others.
     """
-    _values: dict[str, Any]
-    _connects: dict[str, PortId]
+    _attributes: dict[str, _expr.Expr]
 
-    def __init__(self, **kwargs: PortId | Node | Any):
-        self._values = {}
-        self._connects = {}
-        self(**kwargs)
+    def __init__(self, **kwargs: ExprOrNode | Any):
+        self._attributes = {}
+        self.subs(**kwargs)
 
-    def __call__(self, **kwargs: PortId | Node | Any):
+    def __getitem__(self, key: str | int | slice) -> _expr.Expr:
+        if key == slice(None):
+            return _expr.subscription(id(self), None)
+        elif isinstance(key, (str, int)):
+            return _expr.subscription(id(self), key)
+        else:
+            raise TypeError("only supports int, str and slice(None) for "
+                            f"node subscription, got {type(key).__name__}")
+
+    def subs(self, **kwargs: ExprOrNode | Any) -> None:
+        """Set subscriptions for attributes.
+
+        An attribute may take values from other nodes or constants. Use pairs
+        like `arg=node` or `arg=value` to define the souce of the attribute
+        named `arg`. Use `arg=node[index]` for source nodes returning a
+        tuple, list, dict or any other types that supports __getitem__.
+
+        Args:
+            **kwargs (PortId | Node | Any): The attribute-source pairs.
+        """
         for name, value in kwargs.items():
-            if isinstance(value, PortId):
-                self._connects[name] = value
+            if _expr.is_expr(value):
+                self._attributes[name] = value
             elif isinstance(value, Node):
-                self._connects[name] = PortId(id(value), None)
+                self._attributes[name] = _expr.subscription(id(value), None)
             else:
-                self._values[name] = value
+                self._attributes[name] = _expr.constant(value)
 
-    def __getitem__(self, key: str | int) -> PortId:
-        return PortId(id(self), key)
+    def unsubs(self, *names: str) -> None:
+        """Remove subscriptions for attributes."""
+        for name in names:
+            self._attributes.pop(name, None)
 
     def read_context(self, context: dict[int, Any], name: str) -> tuple[Any, bool]:
         """Get value for an input from the context."""
-        if name in self._connects:
-            node_id, index = self._connects[name]
-
-            if node_id in context:
-                val = context[node_id]
-
-                if index is not None:
-                    val = val[index]
-
-                return val, True
-
-            raise InputDataNotFoundError(
-                f"Input {name!r} of {self!r} cannot be found in the context"
-            )
-
-        if name in self._values:
-            return self._values[name], True
+        if name in self._attributes:
+            try:
+                return self._attributes[name](context), True
+            except Exception as e:
+                raise _err.SubscribeError(self, name) from e
 
         return None, False
 
 
-class _RouterMixin:
+class _Recruiter:
     """Supports routing downstream nodes.
 
     Introduce `_downstreams` list for downstream nodes.
-    __rshift__ is available for routing downstream nodes.
+    `link` and `unlink` are available for manage downstream nodes.
     """
-    _downstreams: list[Node]
+    _downstreams: set[Node]
 
-    def __init__(self, downstream: list[Node], /):
+    def __init__(self, downstream: set[Node] | None = None, /):
+        if downstream is None:
+            downstream = set()
         self._downstreams = downstream
 
-    def __rshift__[N: Node](self, other: N) -> N:
-        self._downstreams.append(other)
-        return other
+    def link(self, *other: Node) -> None:
+        """Add downstream nodes to be recruited after execution.
+
+        Args:
+            *other (Node): The downstream nodes to be added.
+        """
+        self._downstreams.update(other)
+
+    def unlink(self, *other: Node) -> None:
+        """Remove downstream nodes. Do nothing for non-existent nodes.
+
+        Args:
+            *other (Node): The downstream nodes to be removed.
+        """
+        self._downstreams.difference_update(other)
 
     @property
-    def downstreams(self) -> tuple[Node, ...]:
-        return tuple(self._downstreams)
+    def downstreams(self) -> set[Node]:
+        return self._downstreams
 
 
-class Execute(_RouterMixin, _ContextReader, Node):
+class Execute(_Recruiter, _ContextReader, NamedNode):
     """Computational Node object."""
     _target: Callable
 
-    def __init__(self, target: Callable, /):
+    def __init__(self, target: Callable, /, *, uname: Any = None):
+        NamedNode.__init__(self, uname=uname)
         _ContextReader.__init__(self)
-        _RouterMixin.__init__(self, [])
-        sig = inspect.signature(self._target)
+        _Recruiter.__init__(self)
+        sig = inspect.signature(target)
 
         for param in sig.parameters.values():
             if param.kind in (PPK.POSITIONAL_ONLY, PPK.VAR_POSITIONAL):
                 raise TypeError("Positional-only parameters are not supported")
 
         self._target = target
-
-    def __repr__(self) -> str:
-        return f"<Node {self._target.__name__} at {hex(id(self))}>"
 
     def submit(self, context: dict[int, Any] = {}):
         input_kwargs = {}
@@ -231,7 +252,7 @@ class Execute(_RouterMixin, _ContextReader, Node):
                 continue
             if has_default:
                 continue
-            raise InputMissingError(f"No value for input {param!r} in {self!r}")
+            raise _err.ParamMissingError(self, param)
 
         return TaskItem(
             target=self._target,
@@ -240,42 +261,82 @@ class Execute(_RouterMixin, _ContextReader, Node):
         )
 
 
-class Branch(_ContextReader, Node):
+class Branch(_ContextReader, NamedNode):
     """Branch the execution based on a condition."""
-    downstreams_true: list[Node]
-    downstreams_false: list[Node]
+    _downstreams_true: set[Node]
+    _downstreams_false: set[Node]
 
-    def __init__(self, condition: bool | PortId = False, /):
+    def __init__(self, condition: ExprOrNode | bool = False, /, *, uname: Any = None) -> None:
+        NamedNode.__init__(self, uname=uname)
         _ContextReader.__init__(self, condition=condition)
-        self.downstreams_false = []
-        self.downstreams_true = []
+        self._downstreams_true = set()
+        self._downstreams_false = set()
 
     @property
     def true(self):
         """Execute downstream nodes when condition is True."""
-        return _RouterMixin(self.downstreams_true)
+        return _Recruiter(self._downstreams_true)
 
     @property
     def false(self):
         """Execute downstream nodes when condition is False."""
-        return _RouterMixin(self.downstreams_false)
+        return _Recruiter(self._downstreams_false)
 
     def submit(self, context: dict[int, Any] = {}):
         val, status = self.read_context(context, "condition")
 
         if bool(val) and status:
-            return TaskItem(recruit=self.downstreams_true)
+            return TaskItem(recruit=self._downstreams_true)
         else:
-            return TaskItem(recruit=self.downstreams_false)
+            return TaskItem(recruit=self._downstreams_false)
 
 
-class Repeat(_RouterMixin, _ContextReader, Node):
+class Repeat(_ContextReader, NamedNode):
     """Repeat the execution for multiple times."""
+    def __init__(self, iterable: ExprOrNode | Iterable[Any] | None = None, *, uname: Any = None) -> None:
+        NamedNode.__init__(self, uname=uname)
+        _ContextReader.__init__(self, iterable=iterable)
+        self._downstreams_iter: set[Node] = set()
+        self._downstreams_stop: set[Node] = set()
+        self._iterator = None
+
+    @property
+    def iter(self):
+        """Execute downstream nodes repeatedly."""
+        return _Recruiter(self._downstreams_iter)
+
+    @property
+    def stop(self):
+        """Execute downstream nodes when the loop is stopped."""
+        return _Recruiter(self._downstreams_stop)
+
+    def submit(self, context: dict[int, Any] = {}):
+        if self._iterator is None:
+            iterable = self.read_context(context, "iterable")[0]
+            self._iterator = iter(iterable)
+        try:
+            current = next(self._iterator)
+        except StopIteration:
+            self._iterator = None
+            return TaskItem(
+                recruit=self._downstreams_stop,
+                control=FlowCtrl.NONE
+            )
+        self.write(context, (current,))
+
+        return TaskItem(
+            recruit=self._downstreams_iter,
+            control=FlowCtrl.ENTER
+        )
+
     @overload
-    def __init__(self, stop: int | PortId = 1, /): ...
+    @classmethod
+    def from_range(cls, stop: int | ExprOrNode = 1, /, *, uname: Any = None) -> Repeat: ...
     @overload
-    def __init__(self, start: int | PortId, stop: int | PortId, step: int | PortId = 1, /): ...
-    def __init__(self, *args):
+    @classmethod
+    def from_range(cls, start: int | ExprOrNode, stop: int | ExprOrNode, step: int | ExprOrNode = 1, /, *, uname: Any = None) -> Repeat: ...
+    @classmethod
+    def from_range(cls, *args, uname: Any = None) -> Repeat:
         if len(args) == 0:
             start, stop, step = 0, 1, 1
         elif len(args) == 1:
@@ -286,49 +347,24 @@ class Repeat(_RouterMixin, _ContextReader, Node):
             start, stop, step = args
         else:
             raise TypeError("Invalid arguments")
-
-        _ContextReader.__init__(self, start=start, stop=stop, step=step)
-        _RouterMixin.__init__(self, [])
-        self.iterator = None
-        self.downstreams_stop = []
-
-    @property
-    def stop(self):
-        """Execute downstream nodes when the loop is stopped."""
-        return _RouterMixin(self.downstreams_stop)
-
-    def submit(self, context: dict[int, Any] = {}):
-        if self.iterator is None:
-            start = self.read_context(context, "start")[0]
-            stop = self.read_context(context, "stop")[0]
-            step = self.read_context(context, "step")[0]
-            self.iterator = iter(range(start, stop, step))
-        try:
-            current = next(self.iterator)
-        except StopIteration:
-            self.iterator = None
-            return TaskItem(
-                recruit=self.downstreams_stop,
-                control=FlowCtrl.NONE
-            )
-
-        self.write(context, (current,))
-        return TaskItem(
-            recruit=self.downstreams,
-            control=FlowCtrl.REPEAT
+        range_expr = _expr.formula(
+            "range(start, stop, step)",
+            start=start, stop=stop, step=step
         )
+        return cls(range_expr, uname=uname)
 
 
-class Break(Node):
+class Break(NamedNode):
     """Break the repeat loop."""
     def submit(self, context: dict[int, Any] = {}):
-        return TaskItem(control=FlowCtrl.BREAK)
+        return TaskItem(control=FlowCtrl.EXIT)
 
 
-class Join(_RouterMixin, Node):
+class Join(_Recruiter, NamedNode):
     """Block the execution until all receivers are triggered."""
-    def __init__(self, num: int = 2):
-        super().__init__([])
+    def __init__(self, num: int = 2, *, uname: Any = None):
+        NamedNode.__init__(self, uname=uname)
+        _Recruiter.__init__(self)
         self.receivers = tuple(Join.Receiver(self, i) for i in range(num))
         self.flags = [False] * num
 
@@ -347,25 +383,26 @@ class Join(_RouterMixin, Node):
 
         def submit(self, context: dict[int, Any] = {}):
             self.parent.flags[self.index] = True
-            return TaskItem(recruit=[self.parent])
+            return TaskItem(recruit={self.parent,})
 
 
-class Group(_RouterMixin, _ContextReader, Node):
+class Group(_Recruiter, _ContextReader, NamedNode):
     """Node group that runs a internal graph."""
-    def __init__(self, graph, values: dict[str, Any]):
-        self._graph = graph
+    def __init__(self, graph, values: dict[str, Any], *, uname: Any = None):
+        NamedNode.__init__(self, uname=uname)
         _ContextReader.__init__(self, **values)
-        _RouterMixin.__init__(self, [])
+        _Recruiter.__init__(self)
+        self._graph = graph
 
     def submit(self, context: dict[int, Any] = {}) -> TaskItem:
-        param_set = set(self._connects.keys()) & set(self._values.keys())
+        param_set = set(self._attributes.keys())
         kwargs: dict[str, Any] = {}
 
         for param in param_set:
             kwargs[param] = self.read_context(context, param)[0]
 
         return TaskItem(
-            target=self._graph.forward,
+            target=self._graph.run,
             kwargs=kwargs,
             recruit=self.downstreams
         )
