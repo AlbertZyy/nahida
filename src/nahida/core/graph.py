@@ -53,11 +53,11 @@ def execute(
             result = task.target(*task.args, **task.kwargs)
             node.write(context, result)
 
-        if task.control == _FC.REPEAT:
+        if task.control == _FC.ENTER:
             exec_stack.append(node)
             trace_stack.append(trace)
             loop_stack.append(node)
-        elif task.control == _FC.BREAK:
+        elif task.control == _FC.EXIT:
             breaking = True
 
         if task.recruit is None:

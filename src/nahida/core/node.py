@@ -33,14 +33,13 @@ class FlowCtrl(StrEnum):
     """Workflow control instruction after execution."""
 
     NONE = "none"
-    """Do nothing and be poped from the stack top."""
+    """Do nothing and be removed from the tasks."""
 
-    REPEAT = "repeat"
-    """Require to be re-pushed into the computation stack."""
+    ENTER = "enter"
+    """Require a new scope for downstreams."""
 
-    BREAK = "break"
-    """Require to pop the nearest re-pushed node directly (no execution)
-    when the next time it is on the top."""
+    EXIT = "exit"
+    """Require cancel the current scope."""
 
 
 @dataclass(slots=True, frozen=True)
@@ -327,7 +326,7 @@ class Repeat(_ContextReader, NamedNode):
 
         return TaskItem(
             recruit=self._downstreams_iter,
-            control=FlowCtrl.REPEAT
+            control=FlowCtrl.ENTER
         )
 
     @overload
@@ -358,7 +357,7 @@ class Repeat(_ContextReader, NamedNode):
 class Break(NamedNode):
     """Break the repeat loop."""
     def submit(self, context: dict[int, Any] = {}):
-        return TaskItem(control=FlowCtrl.BREAK)
+        return TaskItem(control=FlowCtrl.EXIT)
 
 
 class Join(_Recruiter, NamedNode):
