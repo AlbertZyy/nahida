@@ -4,15 +4,10 @@ __all__ = ["Scheduler"]
 
 from typing import Any, Sequence
 from dataclasses import dataclass
-from concurrent.futures import (
-    Executor,
-    Future,
-    wait,
-    FIRST_COMPLETED
-)
 from collections import deque
 
 from .node import FlowCtrl, Node, TaskItem
+from .executor import WorkID, Executor
 
 
 @dataclass(slots=True)
@@ -72,8 +67,7 @@ class Scheduler:
     def __init__(self, *, executor: Executor, max_inflight: int = 1000) -> None:
         """
         Args:
-            executor: executor in `concurrent.futures`, such as
-                ThreadPoolExecutor or ProcessPoolExecutor.
+            executor (Executor): the executor.
             max_inflight (int): maximum number of tasks to be executed in parallel.
         """
         self.executor = executor
@@ -94,7 +88,7 @@ class Scheduler:
         for n in starters:
             ready_nodes.append((n, 0))
 
-        inflight: dict[Future, tuple[Node, int, TaskItem]] = {}
+        inflight: dict[WorkID, tuple[Node, int, TaskItem]] = {}
 
         while True:
             while ready_nodes and len(inflight) < self.max_inflight:
@@ -102,34 +96,44 @@ class Scheduler:
                 task_item = node.submit(context)
 
                 if task_item.target is None:
-                    self._schedule(ready_nodes, scope_manager, task_item, node, scope_id)
+                    self._schedule_downstreams(
+                        ready_nodes, scope_manager, task_item, node, scope_id
+                    )
+                    self._check_and_exit_scope(ready_nodes, scope_manager, scope_id)
                     continue
 
-                fut = self.executor.submit(task_item.target, *task_item.args, **task_item.kwargs)
-                inflight[fut] = (node, scope_id, task_item)
+                wid = self.executor.submit(task_item.target, *task_item.args, **task_item.kwargs)
+                inflight[wid] = (node, scope_id, task_item)
 
             if len(inflight) == 0:
                 if len(ready_nodes) == 0:
                     break
                 continue
 
-            done, _ = wait(inflight.keys(), return_when=FIRST_COMPLETED)
+            event = self.executor.wait()
 
-            for fut in done:
-                node, scope_id, task_item = inflight.pop(fut)
+            if event.work_id is None: # executor-level events
+                if event.is_shutdown():
+                    break
+            else:
+                node, scope_id, task_item = inflight.pop(event.work_id)
 
-                try:
-                    results = fut.result()
-                except Exception as e:
-                    raise RuntimeError(f"Node {node} failed") from e
+                if event.is_success():
+                    node.write(context, event.value)
+                    self._schedule_downstreams(
+                        ready_nodes, scope_manager, task_item, node, scope_id
+                    )
+                elif event.is_failed():
+                    scope_manager.on_node_complete(scope_id)
+                elif event.is_cancelled():
+                    scope_manager.on_node_complete(scope_id)
 
-                node.write(context, results)
-                self._schedule(ready_nodes, scope_manager, task_item, node, scope_id)
+                self._check_and_exit_scope(ready_nodes, scope_manager, scope_id)
 
         return context
 
     @staticmethod
-    def _schedule(
+    def _schedule_downstreams(
         ready_nodes: deque[tuple[Node, int]],
         scope_manager: ScopeManager,
         task_item: TaskItem,
@@ -157,7 +161,12 @@ class Scheduler:
             for nxt in task_item.recruit:
                 ready_nodes.append((nxt, scope_id))
 
-        # If been done/cancelled after scheduling, try exiter
+    @staticmethod
+    def _check_and_exit_scope(
+        ready_nodes: deque[tuple[Node, int]],
+        scope_manager: ScopeManager,
+        scope_id: int
+    ):
         if scope_manager.check_scope_done(scope_id):
             exiter_and_back_id = scope_manager.resolve_exit(scope_id)
 

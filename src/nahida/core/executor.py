@@ -1,7 +1,6 @@
 
 __all__ = [
     "WorkID",
-    "WorkStatus",
     "ErrorInfo",
     "WorkEvent",
     "Executor",
@@ -51,6 +50,18 @@ class WorkEvent:
     status: WorkStatus
     value: Any | None = None
     error_info: ErrorInfo | None = None
+
+    def is_success(self) -> bool:
+        return self.status == WorkStatus.SUCCESS
+
+    def is_failed(self) -> bool:
+        return self.status == WorkStatus.FAILED
+
+    def is_cancelled(self) -> bool:
+        return self.status == WorkStatus.CANCELLED
+
+    def is_shutdown(self) -> bool:
+        return self.status == WorkStatus.SHUTDOWN
 
 
 class Executor:
