@@ -2,7 +2,6 @@
 
 __all__ = [
     "execute",
-    "gin",
     "Graph",
     "GraphThread"
 ]
@@ -17,7 +16,7 @@ from .import errors as _err
 from .node import Node, FlowCtrl as _FC, ExprOrNode
 
 Expr = _expr.Expr
-GRAPH_CTX_ID = -1
+
 type ForwardFunc = Callable[[dict[int, Any], Sequence[Node]], dict[int, Any]]
 
 
@@ -74,11 +73,6 @@ def execute(
     return context
 
 
-def gin(index_or_key: Any = None, /) -> Expr:
-    """Return an expression subscribing attributes from graph inputs."""
-    return _expr.subscription(GRAPH_CTX_ID, index_or_key)
-
-
 class Graph:
     """General computational node graph."""
     def __init__(
@@ -130,9 +124,7 @@ class Graph:
         return repr(self)
 
     def _validate_port(self, port: ExprOrNode) -> Expr:
-        if isinstance(port, Node):
-            return _expr.subscription(id(port), None)
-        elif _expr.is_expr(port):
+        if _expr.is_expr(port):
             return port
         else:
             raise TypeError(
@@ -141,7 +133,7 @@ class Graph:
 
     def _read_context(self, context: dict[int, Any], expr: Expr, expose_item: Any = None):
         try:
-            val = expr(context)
+            val = expr.eval(context)
         except Exception as e:
             raise _err.ExposingError(self, expose_item) from e
 
@@ -166,6 +158,14 @@ class Graph:
 
         return None
 
+    def input(self, name: str | int | None = None) -> Expr:
+        expr = _expr.simple_fetcher(id(self))
+
+        if name is not None:
+            expr = expr[name]
+
+        return expr
+
     def run(
         self,
         args: tuple[Any, ...] = (),
@@ -177,7 +177,7 @@ class Graph:
             initial: dict[int | str, Any] = {}
             initial.update(enumerate(args))
             initial.update(kwargs)
-            context = {GRAPH_CTX_ID: initial}
+            context = {id(self): initial}
         else:
             context = {}
 

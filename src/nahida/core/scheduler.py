@@ -19,7 +19,7 @@ class NodeScope:
 
 
 class ScopeManager:
-    _scope_count = 0
+    _scope_count: int
     scope_table: dict[int, NodeScope]
 
     def __init__(self, num_starters: int) -> None:

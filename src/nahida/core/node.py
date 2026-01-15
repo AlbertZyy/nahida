@@ -26,7 +26,7 @@ from . import errors as _err
 from . import expr as _expr
 
 
-type ExprOrNode = _expr.Expr | Node
+type Expr = _expr.Expr
 
 
 class FlowCtrl(StrEnum):
@@ -55,7 +55,7 @@ class TaskItem:
     control: FlowCtrl = FlowCtrl.NONE
 
 
-class Node(object):
+class Node(_expr.nodal):
     """Abstract base class for all nodes.
 
     Nodes are computational units that can be connected to other nodes, and
@@ -144,20 +144,11 @@ class _ContextReader:
     """
     _attributes: dict[str, _expr.Expr]
 
-    def __init__(self, **kwargs: ExprOrNode | Any):
+    def __init__(self, **kwargs: Expr | Any):
         self._attributes = {}
         self.subs(**kwargs)
 
-    def __getitem__(self, key: str | int | slice) -> _expr.Expr:
-        if key == slice(None):
-            return _expr.subscription(id(self), None)
-        elif isinstance(key, (str, int)):
-            return _expr.subscription(id(self), key)
-        else:
-            raise TypeError("only supports int, str and slice(None) for "
-                            f"node subscription, got {type(key).__name__}")
-
-    def subs(self, **kwargs: ExprOrNode | Any) -> None:
+    def subs(self, **kwargs: Expr | Any) -> None:
         """Set subscriptions for attributes.
 
         An attribute may take values from other nodes or constants. Use pairs
@@ -171,8 +162,6 @@ class _ContextReader:
         for name, value in kwargs.items():
             if _expr.is_expr(value):
                 self._attributes[name] = value
-            elif isinstance(value, Node):
-                self._attributes[name] = _expr.subscription(id(value), None)
             else:
                 self._attributes[name] = _expr.constant(value)
 
@@ -185,7 +174,7 @@ class _ContextReader:
         """Get value for an input from the context."""
         if name in self._attributes:
             try:
-                return self._attributes[name](context), True
+                return self._attributes[name].eval(context), True
             except Exception as e:
                 raise _err.SubscribeError(self, name) from e
 
@@ -266,7 +255,7 @@ class Branch(_ContextReader, NamedNode):
     _downstreams_true: set[Node]
     _downstreams_false: set[Node]
 
-    def __init__(self, condition: ExprOrNode | bool = False, /, *, uname: Any = None) -> None:
+    def __init__(self, condition: Expr | bool = False, /, *, uname: Any = None) -> None:
         NamedNode.__init__(self, uname=uname)
         _ContextReader.__init__(self, condition=condition)
         self._downstreams_true = set()
@@ -293,7 +282,7 @@ class Branch(_ContextReader, NamedNode):
 
 class Repeat(_ContextReader, NamedNode):
     """Repeat the execution for multiple times."""
-    def __init__(self, iterable: ExprOrNode | Iterable[Any] | None = None, *, uname: Any = None) -> None:
+    def __init__(self, iterable: Expr | Iterable[Any] | None = None, *, uname: Any = None) -> None:
         NamedNode.__init__(self, uname=uname)
         _ContextReader.__init__(self, iterable=iterable)
         self._downstreams_iter: set[Node] = set()
@@ -331,10 +320,10 @@ class Repeat(_ContextReader, NamedNode):
 
     @overload
     @classmethod
-    def from_range(cls, stop: int | ExprOrNode = 1, /, *, uname: Any = None) -> Repeat: ...
+    def from_range(cls, stop: int | Expr = 1, /, *, uname: Any = None) -> Repeat: ...
     @overload
     @classmethod
-    def from_range(cls, start: int | ExprOrNode, stop: int | ExprOrNode, step: int | ExprOrNode = 1, /, *, uname: Any = None) -> Repeat: ...
+    def from_range(cls, start: int | Expr, stop: int | Expr, step: int | Expr = 1, /, *, uname: Any = None) -> Repeat: ...
     @classmethod
     def from_range(cls, *args, uname: Any = None) -> Repeat:
         if len(args) == 0:
