@@ -42,18 +42,18 @@ class NBaseException(Exception):
 class DataNotFoundError(NBaseException):
     """Raised when a subscribed data not found in the context."""
     ERROR_CODE = "SCHEDULING_ERROR.DATA_NOTFOUND"
-    def __init__(self, ctx_id: int) -> None:
-        message = "key {} not found in the context; check execution order".format(ctx_id)
-        super().__init__(message, (ctx_id,))
+    def __init__(self, obj: Any) -> None:
+        name = _make_node_name(obj)
+        message = "key {} not found in the context; check execution order".format(name)
+        super().__init__(message, (name,))
 
 
 class DataGetItemError(NBaseException):
     """Raised when `KeyError` or `IndexError` is raised in any result subscription."""
     ERROR_CODE = "SCHEDULING_ERROR.DATA_GETITEM_FAILED"
-    def __init__(self, node: Any, output_item: Any) -> None:
-        node_name = _make_node_name(node)
-        message = "data of key {!r} does not supports getitem by {!r}".format(node_name, output_item)
-        super().__init__(message, (node_name, output_item))
+    def __init__(self, type: str, output_item: Any) -> None:
+        message = "data of type {!r} does not supports getitem by {!r}".format(type, output_item)
+        super().__init__(message, (type, output_item))
 
 
 class UnionError(NBaseException):
