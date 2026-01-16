@@ -13,7 +13,7 @@ from collections.abc import Sequence, Callable
 
 from .import expr as _expr
 from .import errors as _err
-from .node import Node, FlowCtrl as _FC, ExprOrNode
+from .node import Node, FlowCtrl as _FC
 
 Expr = _expr.Expr
 
@@ -78,7 +78,7 @@ class Graph:
     def __init__(
         self,
         starters: Sequence[Node],
-        exposes: ExprOrNode | tuple[ExprOrNode, ...] | dict[str, ExprOrNode] | None = None,
+        exposes: Expr | tuple[Expr, ...] | dict[str, Expr] | None = None,
         *,
         gname: str | None = None
     ):
@@ -123,7 +123,7 @@ class Graph:
             return self._gname
         return repr(self)
 
-    def _validate_port(self, port: ExprOrNode) -> Expr:
+    def _validate_port(self, port: Expr) -> Expr:
         if _expr.is_expr(port):
             return port
         else:
