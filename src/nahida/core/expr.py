@@ -5,14 +5,8 @@ __all__ = [] # NOTE: not allowed to be imported by *
 from typing import Any, TypeGuard
 from collections.abc import Callable
 
+from . import _objbase
 from . import errors as _err
-
-
-def _to_expr(obj: Any, /) -> Expr:
-    if not is_expr(obj):
-        obj = constant(obj)
-
-    return obj
 
 
 def _general_eval(obj: Any, /, context: dict[int, Any]) -> Any:
@@ -22,20 +16,20 @@ def _general_eval(obj: Any, /, context: dict[int, Any]) -> Any:
         return obj
 
 
-class Expr:
+class Expr(_objbase.UIDMixin):
     """Callable on context to get values."""
     def eval(self, context: dict[int, Any], /) -> Any:
         """Evaluate the expression on the given context."""
         raise NotImplementedError()
 
-    def __getitem__(self, index: int | str) -> subscription:
-        return subscription(self, index)
+    def __getitem__(self, index: int | str) -> GetItemExpr:
+        return GetItemExpr(self, index)
 
-    def __or__(self, other: Any, /) -> union:
-        return union(self, _to_expr(other))
+    def __or__(self, other: Any, /) -> UnionExpr:
+        return UnionExpr(self, other)
 
-    def __ror__(self, other: Any, /) -> union:
-        return union(_to_expr(other), self)
+    def __ror__(self, other: Any, /) -> UnionExpr:
+        return UnionExpr(other, self)
 
 
 def is_expr(obj: Any, /) -> TypeGuard[Expr]:
@@ -55,7 +49,7 @@ class simple_fetcher(Expr):
             raise _err.DataNotFoundError(self._obj) from e
 
 
-class constant(Expr):
+class ConstExpr(Expr):
     def __init__(self, value: Any, /) -> None:
         """Construct a constant expression."""
         super().__init__()
@@ -65,7 +59,18 @@ class constant(Expr):
         return self._value
 
 
-class subscription(Expr):
+class RefExpr(Expr):
+    def eval(self, context: dict[int, Any], /) -> Any:
+        """Get output values from the context.
+
+        Raises *DataNotFoundError* if uid is not exsist."""
+        try:
+            return context[self.uid]
+        except KeyError as e:
+            raise _err.DataNotFoundError(self) from e
+
+
+class GetItemExpr(Expr):
     def __init__(
         self,
         expr: Expr,
@@ -91,8 +96,8 @@ class subscription(Expr):
         return val
 
 
-class union(Expr):
-    def __init__(self, *exprs: Expr) -> None:
+class UnionExpr(Expr):
+    def __init__(self, *exprs: Expr | Any) -> None:
         """Construct an expression returning the first value that was successfully
         evaluated.
 
@@ -100,16 +105,18 @@ class union(Expr):
             - *UnionError*: after all failed.
         """
         super().__init__()
-        self._exprs: list[Expr] = []
+        self._exprs: list[Expr | Any] = []
 
         for expr in exprs:
-            if isinstance(expr, union):
+            if isinstance(expr, UnionExpr):
                 self._exprs.extend(expr._exprs)
             else:
                 self._exprs.append(expr)
 
     def eval(self, context: dict[int, Any], /):
         for expr in self._exprs:
+            if not isinstance(expr, Expr):
+                return expr
             try:
                 return expr.eval(context)
             except (
@@ -122,11 +129,11 @@ class union(Expr):
         raise _err.UnionError()
 
 
-class formula(Expr):
+class FormulaExpr(Expr):
     def __init__(
         self,
         source: str,
-        **attributes: Expr | Any,
+        **locals: Expr | Any,
     ) -> None:
         """Construct an expression of the given formula.
 
@@ -137,12 +144,13 @@ class formula(Expr):
             source (str): Python expression.
             **attributes (dict[str, Expr]): values for variables in the source.
         """
+        self._source = source
         self._func = lambda **kwargs: eval(source, {}, kwargs)
-        self._attributes = attributes
+        self._locals = locals
 
     def eval(self, context: dict[int, Any], /):
         local_vars: dict[str, Any] = {}
-        for name, value in self._attributes.items():
+        for name, value in self._locals.items():
             local_vars[name] = _general_eval(value, context)
         try:
             return self._func(**local_vars)
@@ -150,7 +158,7 @@ class formula(Expr):
             raise _err.ExprEvalError() from e
 
 
-class functional(Expr):
+class FunctionExpr(Expr):
     def __init__(self, func: Callable[..., Any], /, *args: Any, **kwargs: Any) -> None:
         super().__init__()
         self._func = func
@@ -166,4 +174,4 @@ class functional(Expr):
 def expression(func: Callable[..., Any], /):
     """A decorator that transforms a function into an expression operator."""
     from functools import partial
-    return partial(functional, func)
+    return partial(FunctionExpr, func)

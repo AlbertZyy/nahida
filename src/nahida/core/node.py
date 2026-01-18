@@ -21,6 +21,7 @@ from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from enum import StrEnum
 
+from . import _objbase
 from . import errors as _err
 from . import expr as _expr
 
@@ -54,7 +55,7 @@ class TaskItem:
     control: FlowCtrl = FlowCtrl.NONE
 
 
-class Node(_expr.Expr):
+class Node(_objbase.NameMixin, _expr.RefExpr):
     """Abstract base class for all nodes.
 
     Nodes are computational units that can be connected to other nodes, and
@@ -68,12 +69,7 @@ class Node(_expr.Expr):
     corresponding output values.
     """
     def __init__(self, *, uid: int | None = None) -> None:
-        from uuid import uuid4
-        self._uid = int(uuid4()) if uid is None else uid
-
-    @property
-    def uid(self) -> int:
-        return self._uid
+        _expr.Expr.__init__(self, uid=uid)
 
     def submit(self, context: dict[int, Any]) -> TaskItem:
         """Get a task to be submitted to the task queue.
@@ -105,19 +101,6 @@ class Node(_expr.Expr):
         """
         context[self.uid] = values
 
-    def eval(self, context: dict[int, Any], /) -> Any:
-        """Get output values from the context.
-
-        Raises *DataNotFoundError* if uid is not exsist."""
-        try:
-            return context[self.uid]
-        except KeyError as e:
-            raise _err.DataNotFoundError(self) from e
-
-    def __repr__(self) -> str:
-        type_name = self.__class__.__name__
-        return "<{} node at {}>".format(type_name, hex(id(self)))
-
 
 def get_inputs(func: Callable) -> Iterable[tuple[str, Any, bool]]:
     """Return the node's input names and defaults."""
@@ -129,29 +112,6 @@ def get_inputs(func: Callable) -> Iterable[tuple[str, Any, bool]]:
             yield name, param.default, has_default
         if param.kind in (PPK.POSITIONAL_ONLY, PPK.VAR_POSITIONAL):
             raise TypeError("Positional-only parameters are not supported")
-
-
-class _NamedObj:
-    """Support unique names for __repr__."""
-    _uname: str | None = None
-
-    def __repr__(self) -> str:
-        type_name = self.__class__.__name__
-
-        if self._uname:
-            return "{}({})".format(type_name, self._uname)
-
-        return super().__repr__()
-
-    @property
-    def __name__(self):
-        if self._uname:
-            return self._uname
-
-        return super().__repr__()
-
-    def set_name(self, name: str | None, /):
-        self._uname = name
 
 
 class _ContextReader:
@@ -180,7 +140,7 @@ class _ContextReader:
             if _expr.is_expr(value):
                 self._attributes[name] = value
             else:
-                self._attributes[name] = _expr.constant(value)
+                self._attributes[name] = _expr.ConstExpr(value)
 
     def unsubs(self, *names: str) -> None:
         """Remove subscriptions for attributes."""
@@ -232,7 +192,7 @@ class _Recruiter:
         return self._downstreams
 
 
-class Execute(_Recruiter, _ContextReader, _NamedObj, Node):
+class Execute(_Recruiter, _ContextReader, Node):
     """Computational Node object."""
     _target: Callable
 
@@ -267,7 +227,7 @@ class Execute(_Recruiter, _ContextReader, _NamedObj, Node):
         )
 
 
-class Branch(_ContextReader, _NamedObj, Node):
+class Branch(_ContextReader, Node):
     """Branch the execution based on a condition."""
     _downstreams_true: set[Node]
     _downstreams_false: set[Node]
@@ -297,7 +257,7 @@ class Branch(_ContextReader, _NamedObj, Node):
             return TaskItem(recruit=self._downstreams_false)
 
 
-class Repeat(_ContextReader, _NamedObj, Node):
+class Repeat(_ContextReader, Node):
     """Repeat the execution for multiple times."""
     def __init__(self, iterable: Expr | Iterable[Any] | None = None, *, uid: int | None = None) -> None:
         Node.__init__(self, uid=uid)
@@ -353,20 +313,20 @@ class Repeat(_ContextReader, _NamedObj, Node):
             start, stop, step = args
         else:
             raise TypeError("Invalid arguments")
-        range_expr = _expr.formula(
+        range_expr = _expr.FormulaExpr(
             "range(start, stop, step)",
             start=start, stop=stop, step=step
         )
         return cls(range_expr, uid=uid)
 
 
-class Break(_NamedObj, Node):
+class Break(Node):
     """Break the repeat loop."""
     def submit(self, context: dict[int, Any] = {}):
         return TaskItem(control=FlowCtrl.EXIT)
 
 
-class Join(_Recruiter, _NamedObj, Node):
+class Join(_Recruiter, Node):
     """Block the execution until all receivers are triggered."""
     def __init__(self, num: int = 2, *, uid: Any = None):
         Node.__init__(self, uid=uid)
@@ -392,7 +352,7 @@ class Join(_Recruiter, _NamedObj, Node):
             return TaskItem(recruit={self.parent,})
 
 
-class Group(_Recruiter, _ContextReader, _NamedObj, Node):
+class Group(_Recruiter, _ContextReader, Node):
     """Node group that runs a internal graph."""
     def __init__(self, graph, values: dict[str, Any], *, uid: Any = None):
         Node.__init__(self, uid=uid)
