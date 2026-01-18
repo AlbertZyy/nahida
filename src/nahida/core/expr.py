@@ -25,6 +25,7 @@ def _general_eval(obj: Any, /, context: dict[int, Any]) -> Any:
 class Expr:
     """Callable on context to get values."""
     def eval(self, context: dict[int, Any], /) -> Any:
+        """Evaluate the expression on the given context."""
         raise NotImplementedError()
 
     def __getitem__(self, index: int | str) -> subscription:
@@ -52,14 +53,6 @@ class simple_fetcher(Expr):
             return context[self._obj]
         except KeyError as e:
             raise _err.DataNotFoundError(self._obj) from e
-
-
-class nodal(Expr):
-    def eval(self, context: dict[int, Any], /) -> Any:
-        try:
-            return context[id(self)]
-        except KeyError as e:
-            raise _err.DataNotFoundError(self) from e
 
 
 class constant(Expr):
@@ -164,7 +157,7 @@ class functional(Expr):
         self._args = args
         self._kwargs = kwargs
 
-    def eval(self, context: dict[int, Any], ):
+    def eval(self, context: dict[int, Any], /):
         local_args = [_general_eval(arg, context) for arg in self._args]
         local_kwargs = {name: _general_eval(value, context) for name, value in self._kwargs.items()}
         return self._func(*local_args, **local_kwargs)
