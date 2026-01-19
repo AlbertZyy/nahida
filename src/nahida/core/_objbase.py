@@ -32,7 +32,7 @@ class NameMixin:
         return super().__repr__()
 
     @property
-    def __name__(self):
+    def uname(self):
         if self._uname:
             return self._uname
 
