@@ -11,9 +11,10 @@ from queue import Queue
 from typing import Any
 from collections.abc import Sequence, Callable
 
-from .import expr as _expr
-from .import errors as _err
-from .node import Node, FlowCtrl as _FC, ExprOrNode
+from . import _objbase as _ob
+from . import expr as _expr
+from . import errors as _err
+from .node import Node, FlowCtrl as _FC
 
 Expr = _expr.Expr
 
@@ -73,24 +74,23 @@ def execute(
     return context
 
 
-class Graph:
+class Graph(_ob.NameMixin, _ob.UIDMixin):
     """General computational node graph."""
     def __init__(
         self,
         starters: Sequence[Node],
-        exposes: ExprOrNode | tuple[ExprOrNode, ...] | dict[str, ExprOrNode] | None = None,
+        exposes: Expr | tuple[Expr, ...] | dict[str, Expr] | None = None,
         *,
-        gname: str | None = None
+        uid: int | None = None
     ):
         """
         Args:
             starters (Iterable of Node): The root nodes for execution.
             exposes (Node, Expr, tuple, dict): Subscribed for outputs.
-            gname (str | None): Name for the graph.
         """
+        _ob.UIDMixin.__init__(self, uid=uid)
         self._starters = starters
         self._expose: Expr | tuple[Expr, ...] | dict[str, Expr] | None = None
-        self._gname = gname
 
         if exposes is None:
             return
@@ -109,21 +109,7 @@ class Graph:
                 f"got {type(exposes).__name__!r}."
             )
 
-    def __repr__(self) -> str:
-        type_name = self.__class__.__name__
-
-        if self._gname:
-            return "{}({})".format(type_name, self._gname)
-
-        return "<graph {} at {}>".format(type_name, hex(id(self)))
-
-    @property
-    def __name__(self) -> str:
-        if self._gname:
-            return self._gname
-        return repr(self)
-
-    def _validate_port(self, port: ExprOrNode) -> Expr:
+    def _validate_port(self, port: Expr) -> Expr:
         if _expr.is_expr(port):
             return port
         else:
@@ -159,7 +145,7 @@ class Graph:
         return None
 
     def input(self, name: str | int | None = None) -> Expr:
-        expr = _expr.simple_fetcher(id(self))
+        expr = _expr.simple_fetcher(self.uid)
 
         if name is not None:
             expr = expr[name]
@@ -177,7 +163,7 @@ class Graph:
             initial: dict[int | str, Any] = {}
             initial.update(enumerate(args))
             initial.update(kwargs)
-            context = {id(self): initial}
+            context = {self.uid: initial}
         else:
             context = {}
 

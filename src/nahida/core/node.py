@@ -6,7 +6,6 @@ __all__ = [
     "FlowCtrl",
     "TaskItem",
     "Node",
-    "NamedNode",
     "Execute",
     "Branch",
     "Repeat",
@@ -22,6 +21,7 @@ from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from enum import StrEnum
 
+from . import _objbase
 from . import errors as _err
 from . import expr as _expr
 
@@ -55,7 +55,7 @@ class TaskItem:
     control: FlowCtrl = FlowCtrl.NONE
 
 
-class Node(_expr.nodal):
+class Node(_objbase.NameMixin, _expr.RefExpr):
     """Abstract base class for all nodes.
 
     Nodes are computational units that can be connected to other nodes, and
@@ -68,6 +68,9 @@ class Node(_expr.nodal):
     Here `context` is a dictionary of node IDs to the
     corresponding output values.
     """
+    def __init__(self, *, uid: int | None = None) -> None:
+        _expr.Expr.__init__(self, uid=uid)
+
     def submit(self, context: dict[int, Any]) -> TaskItem:
         """Get a task to be submitted to the task queue.
 
@@ -90,17 +93,13 @@ class Node(_expr.nodal):
         raise NotImplementedError
 
     def write(self, context: dict[int, Any], values: Any) -> None:
-        """Put values into the context.
+        """Put output values into the context.
 
         Args:
             context (dict[int, Any]): The context of the environment.
             values (Any): The values to be put into the context.
         """
-        context[id(self)] = values
-
-    def __repr__(self) -> str:
-        type_name = self.__class__.__name__
-        return "<{} node at {}>".format(type_name, hex(id(self)))
+        context[self.uid] = values
 
 
 def get_inputs(func: Callable) -> Iterable[tuple[str, Any, bool]]:
@@ -115,34 +114,12 @@ def get_inputs(func: Callable) -> Iterable[tuple[str, Any, bool]]:
             raise TypeError("Positional-only parameters are not supported")
 
 
-class NamedNode(Node):
-    """Nodes support unique names as the keys."""
-
-    def __init__(self, *, uname: Any = None) -> None:
-        self.uname = uname
-
-    def __repr__(self) -> str:
-        type_name = self.__class__.__name__
-
-        if self.uname:
-            return "{}({})".format(type_name, self.uname)
-
-        return super().__repr__()
-
-    @property
-    def __name__(self):
-        if self.uname:
-            return self.uname
-
-        return super().__repr__()
-
-
 class _ContextReader:
     """Supports read_context in a node.
 
     Introduce `_values` and `_connects` dicts for defaults and subscriptions.
     """
-    _attributes: dict[str, _expr.Expr]
+    _attributes: dict[str, Expr]
 
     def __init__(self, **kwargs: Expr | Any):
         self._attributes = {}
@@ -163,7 +140,7 @@ class _ContextReader:
             if _expr.is_expr(value):
                 self._attributes[name] = value
             else:
-                self._attributes[name] = _expr.constant(value)
+                self._attributes[name] = _expr.ConstExpr(value)
 
     def unsubs(self, *names: str) -> None:
         """Remove subscriptions for attributes."""
@@ -215,12 +192,12 @@ class _Recruiter:
         return self._downstreams
 
 
-class Execute(_Recruiter, _ContextReader, NamedNode):
+class Execute(_Recruiter, _ContextReader, Node):
     """Computational Node object."""
     _target: Callable
 
-    def __init__(self, target: Callable, /, *, uname: Any = None):
-        NamedNode.__init__(self, uname=uname)
+    def __init__(self, target: Callable, /, *, uid: Any = None):
+        Node.__init__(self, uid=uid)
         _ContextReader.__init__(self)
         _Recruiter.__init__(self)
         sig = inspect.signature(target)
@@ -250,13 +227,13 @@ class Execute(_Recruiter, _ContextReader, NamedNode):
         )
 
 
-class Branch(_ContextReader, NamedNode):
+class Branch(_ContextReader, Node):
     """Branch the execution based on a condition."""
     _downstreams_true: set[Node]
     _downstreams_false: set[Node]
 
-    def __init__(self, condition: Expr | bool = False, /, *, uname: Any = None) -> None:
-        NamedNode.__init__(self, uname=uname)
+    def __init__(self, condition: Expr | bool = False, /, *, uid: int | None = None) -> None:
+        Node.__init__(self, uid=uid)
         _ContextReader.__init__(self, condition=condition)
         self._downstreams_true = set()
         self._downstreams_false = set()
@@ -280,10 +257,10 @@ class Branch(_ContextReader, NamedNode):
             return TaskItem(recruit=self._downstreams_false)
 
 
-class Repeat(_ContextReader, NamedNode):
+class Repeat(_ContextReader, Node):
     """Repeat the execution for multiple times."""
-    def __init__(self, iterable: Expr | Iterable[Any] | None = None, *, uname: Any = None) -> None:
-        NamedNode.__init__(self, uname=uname)
+    def __init__(self, iterable: Expr | Iterable[Any] | None = None, *, uid: int | None = None) -> None:
+        Node.__init__(self, uid=uid)
         _ContextReader.__init__(self, iterable=iterable)
         self._downstreams_iter: set[Node] = set()
         self._downstreams_stop: set[Node] = set()
@@ -320,12 +297,12 @@ class Repeat(_ContextReader, NamedNode):
 
     @overload
     @classmethod
-    def from_range(cls, stop: int | Expr = 1, /, *, uname: Any = None) -> Repeat: ...
+    def from_range(cls, stop: int | Expr = 1, /, *, uid: Any = None) -> Repeat: ...
     @overload
     @classmethod
-    def from_range(cls, start: int | Expr, stop: int | Expr, step: int | Expr = 1, /, *, uname: Any = None) -> Repeat: ...
+    def from_range(cls, start: int | Expr, stop: int | Expr, step: int | Expr = 1, /, *, uid: Any = None) -> Repeat: ...
     @classmethod
-    def from_range(cls, *args, uname: Any = None) -> Repeat:
+    def from_range(cls, *args, uid: Any = None) -> Repeat:
         if len(args) == 0:
             start, stop, step = 0, 1, 1
         elif len(args) == 1:
@@ -336,23 +313,23 @@ class Repeat(_ContextReader, NamedNode):
             start, stop, step = args
         else:
             raise TypeError("Invalid arguments")
-        range_expr = _expr.formula(
+        range_expr = _expr.FormulaExpr(
             "range(start, stop, step)",
             start=start, stop=stop, step=step
         )
-        return cls(range_expr, uname=uname)
+        return cls(range_expr, uid=uid)
 
 
-class Break(NamedNode):
+class Break(Node):
     """Break the repeat loop."""
     def submit(self, context: dict[int, Any] = {}):
         return TaskItem(control=FlowCtrl.EXIT)
 
 
-class Join(_Recruiter, NamedNode):
+class Join(_Recruiter, Node):
     """Block the execution until all receivers are triggered."""
-    def __init__(self, num: int = 2, *, uname: Any = None):
-        NamedNode.__init__(self, uname=uname)
+    def __init__(self, num: int = 2, *, uid: Any = None):
+        Node.__init__(self, uid=uid)
         _Recruiter.__init__(self)
         self.receivers = tuple(Join.Receiver(self, i) for i in range(num))
         self.flags = [False] * num
@@ -375,10 +352,10 @@ class Join(_Recruiter, NamedNode):
             return TaskItem(recruit={self.parent,})
 
 
-class Group(_Recruiter, _ContextReader, NamedNode):
+class Group(_Recruiter, _ContextReader, Node):
     """Node group that runs a internal graph."""
-    def __init__(self, graph, values: dict[str, Any], *, uname: Any = None):
-        NamedNode.__init__(self, uname=uname)
+    def __init__(self, graph, values: dict[str, Any], *, uid: Any = None):
+        Node.__init__(self, uid=uid)
         _ContextReader.__init__(self, **values)
         _Recruiter.__init__(self)
         self._graph = graph
