@@ -324,10 +324,10 @@ class Repeat(_ContextReader, Node):
         return cls(range(start, stop, step), uid=uid)
 
 
-class Break(Node):
+class Break(_Recruiter, Node):
     """Break the repeat loop."""
     def submit(self, context: dict[int, Any] = {}):
-        return TaskItem(control=FlowCtrl.EXIT)
+        return TaskItem(recruit=self.downstreams, control=FlowCtrl.EXIT)
 
 
 class Join(_Recruiter, Node):
@@ -357,12 +357,15 @@ class Join(_Recruiter, Node):
 
 
 class Group(_Recruiter, _ContextReader, Node):
-    """Node group that runs a internal graph."""
+    """Node group that runs an internal graph."""
     def __init__(self, graph, values: dict[str, Any], *, uid: Any = None):
         Node.__init__(self, uid=uid)
         _ContextReader.__init__(self, **values)
         _Recruiter.__init__(self)
+        from .graph import Graph
+        assert isinstance(graph, Graph), "invalid graph"
         self._graph = graph
+        self._func = graph.lambdify()
 
     def submit(self, context: dict[int, Any] = {}) -> TaskItem:
         param_set = set(self._attributes.keys())
@@ -372,7 +375,7 @@ class Group(_Recruiter, _ContextReader, Node):
             kwargs[param] = self.read_context(context, param)[0]
 
         return TaskItem(
-            target=self._graph.run,
+            target=self._func,
             kwargs=kwargs,
             recruit=self.downstreams
         )

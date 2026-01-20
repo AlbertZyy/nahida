@@ -174,9 +174,12 @@ class Graph(_ob.NameMixin, _ob.UIDMixin):
 
         Args:
             forward (Callable): The forward method of a scheduler to be injected.
-                It should receives a context and a list of starters, and returns
-                the result context (inplace operations allowed).
+                It should receives a context and a sequence of starters, and
+                returns the result context (inplace operations allowed).
                 Defaults to `None`, using the global default scheduler.
+
+        Returns:
+            Callable: The lambda function.
         """
         def runner(*args, **kwargs):
             if args or kwargs:
