@@ -3,33 +3,39 @@ from __future__ import annotations
 __all__ = [] # NOTE: not allowed to be imported by *
 
 from typing import Any, TypeGuard
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 
 from . import _objbase
 from . import errors as _err
 
 
-def _general_eval(obj: Any, /, context: dict[int, Any]) -> Any:
-    if is_expr(obj):
-        return obj.eval(context)
-    else:
+def _to_expr(obj: Any, /) -> Expr:
+    if isinstance(obj, Expr):
         return obj
+    return ConstExpr(obj)
 
 
 class Expr(_objbase.UIDMixin):
-    """Callable on context to get values."""
-    def eval(self, context: dict[int, Any], /) -> Any:
+    """Base class for expressions
+
+    Expressions are designed for lightweight data transformations between nodes.
+    They are evaluated in a stack-like manner.
+    """
+    def eval(self, context: Mapping[int, Any], /) -> Any:
         """Evaluate the expression on the given context."""
         raise NotImplementedError()
+
+    def __call__(self, context: Mapping[int, Any], /) -> Any:
+        return self.eval(context)
 
     def __getitem__(self, index: int | str) -> GetItemExpr:
         return GetItemExpr(self, index)
 
     def __or__(self, other: Any, /) -> UnionExpr:
-        return UnionExpr(self, other)
+        return UnionExpr(self, _to_expr(other))
 
     def __ror__(self, other: Any, /) -> UnionExpr:
-        return UnionExpr(other, self)
+        return UnionExpr(_to_expr(other), self)
 
 
 def is_expr(obj: Any, /) -> TypeGuard[Expr]:
@@ -42,28 +48,30 @@ class simple_fetcher(Expr):
         super().__init__()
         self._obj = index
 
-    def eval(self, context: dict[int, Any], /) -> Any:
+    def eval(self, context: Mapping[int, Any], /) -> Any:
         try:
             return context[self._obj]
         except KeyError as e:
             raise _err.DataNotFoundError(self._obj) from e
 
 
-class ConstExpr(Expr):
-    def __init__(self, value: Any, /) -> None:
-        """Construct a constant expression."""
+class ConstExpr[T](Expr):
+    """Constant expression that always returns the given value."""
+    def __init__(self, value: T, /) -> None:
         super().__init__()
         self._value = value
 
-    def eval(self, context: dict[int, Any], /):
+    def eval(self, context: Mapping[int, Any], /) -> T:
         return self._value
 
 
 class RefExpr(Expr):
-    def eval(self, context: dict[int, Any], /) -> Any:
-        """Get output values from the context.
+    """Reference expression that subscribes values from context.
 
-        Raises *DataNotFoundError* if uid is not exsist."""
+    Raises *DataNotFoundError* if the UID of this expression does not exist in
+    the context.
+    """
+    def eval(self, context: Mapping[int, Any], /) -> Any:
         try:
             return context[self.uid]
         except KeyError as e:
@@ -71,21 +79,17 @@ class RefExpr(Expr):
 
 
 class GetItemExpr(Expr):
-    def __init__(
-        self,
-        expr: Expr,
-        index: int | str,
-    ) -> None:
-        """Construct an expression subscribing values from context.
+    """Get-item expression that leverages the `__getitem__` method of another
+    expression's value.
 
-        The expression raises:
-            - *DataGetItemError*: when `data[index]` failed.
-        """
+    Raises *DataGetItemError* when failed.
+    """
+    def __init__(self, expr: Expr, index: int | str, /) -> None:
         super().__init__()
         self._expr = expr
         self._index = index
 
-    def eval(self, context: dict[int, Any], /):
+    def eval(self, context: Mapping[int, Any], /) -> Any:
         val = self._expr.eval(context)
 
         try:
@@ -97,15 +101,14 @@ class GetItemExpr(Expr):
 
 
 class UnionExpr(Expr):
-    def __init__(self, *exprs: Expr | Any) -> None:
-        """Construct an expression returning the first value that was successfully
-        evaluated.
+    """Union expression that returns the first value that was successfully
+    evaluated.
 
-        The expression raises:
-            - *UnionError*: after all failed.
-        """
+    Raises *UnionError* after all child expression failed.
+    """
+    def __init__(self, *exprs: Expr) -> None:
         super().__init__()
-        self._exprs: list[Expr | Any] = []
+        self._exprs: list[Expr] = []
 
         for expr in exprs:
             if isinstance(expr, UnionExpr):
@@ -113,10 +116,8 @@ class UnionExpr(Expr):
             else:
                 self._exprs.append(expr)
 
-    def eval(self, context: dict[int, Any], /):
+    def eval(self, context: Mapping[int, Any], /) -> Any:
         for expr in self._exprs:
-            if not isinstance(expr, Expr):
-                return expr
             try:
                 return expr.eval(context)
             except (
@@ -130,28 +131,28 @@ class UnionExpr(Expr):
 
 
 class FormulaExpr(Expr):
-    def __init__(
-        self,
-        source: str,
-        **locals: Expr | Any,
-    ) -> None:
-        """Construct an expression of the given formula.
+    """Formula expression that evaluates a Python expression.
 
-        The expression raises:
-            - *ExprEvalError*: when evaluation failed.
+    Raises *ExprEvalError* when the evaluation failed.
 
-        Args:
-            source (str): Python expression.
-            **attributes (dict[str, Expr]): values for variables in the source.
-        """
+    Args:
+        source (str): Python expression.
+        **attributes (dict[str, Expr]): values for variables in the source.
+    """
+    def __init__(self, source: str, /, **locals: Expr) -> None:
+        save_builtins = dict(__builtins__).copy()
+        save_builtins.update(vars(__import__("math")))
+        save_builtins.pop("__import__", None)
+        save_builtins.pop("__loader__", None)
+
         self._source = source
-        self._func = lambda **kwargs: eval(source, {}, kwargs)
+        self._func = lambda **kwargs: eval(
+            source, {"__builtins__": save_builtins}, kwargs
+        )
         self._locals = locals
 
-    def eval(self, context: dict[int, Any], /):
-        local_vars: dict[str, Any] = {}
-        for name, value in self._locals.items():
-            local_vars[name] = _general_eval(value, context)
+    def eval(self, context: Mapping[int, Any], /) -> Any:
+        local_vars = {name: value.eval(context) for name, value in self._locals.items()}
         try:
             return self._func(**local_vars)
         except Exception as e:
@@ -159,16 +160,23 @@ class FormulaExpr(Expr):
 
 
 class FunctionExpr(Expr):
-    def __init__(self, func: Callable[..., Any], /, *args: Any, **kwargs: Any) -> None:
+    """Function expression that returns the result of a function call.
+
+    Raises *ExprEvalError* when the evaluation failed.
+    """
+    def __init__(self, func: Callable[..., Any], /, *args: Expr, **kwargs: Expr) -> None:
         super().__init__()
         self._func = func
         self._args = args
         self._kwargs = kwargs
 
-    def eval(self, context: dict[int, Any], /):
-        local_args = [_general_eval(arg, context) for arg in self._args]
-        local_kwargs = {name: _general_eval(value, context) for name, value in self._kwargs.items()}
-        return self._func(*local_args, **local_kwargs)
+    def eval(self, context: Mapping[int, Any], /) -> Any:
+        local_args = [arg.eval(context) for arg in self._args]
+        local_kwargs = {name: value.eval(context) for name, value in self._kwargs.items()}
+        try:
+            return self._func(*local_args, **local_kwargs)
+        except Exception as e:
+            raise _err.ExprEvalError() from e
 
 
 def expression(func: Callable[..., Any], /):
