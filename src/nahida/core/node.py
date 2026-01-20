@@ -72,7 +72,7 @@ class Node(_objbase.NameMixin, _expr.RefExpr):
         _expr.Expr.__init__(self, uid=uid)
 
     def submit(self, context: dict[int, Any]) -> TaskItem:
-        """Get a task to be submitted to the task queue.
+        """Return a task to be submitted to the task queue.
 
         A task item is a dataclass containing the following fields:
         - target: the function to be executed. None for no execution tasks.
@@ -91,6 +91,11 @@ class Node(_objbase.NameMixin, _expr.RefExpr):
             TaskItem: The task item to be submitted to the task queue.
         """
         raise NotImplementedError
+
+    def exit(self) -> None:
+        """Called after any scope that created by this node is exited by
+        another node."""
+        return
 
     def write(self, context: dict[int, Any], values: Any) -> None:
         """Put output values into the context.
@@ -295,6 +300,9 @@ class Repeat(_ContextReader, Node):
             control=FlowCtrl.ENTER
         )
 
+    def exit(self) -> None:
+        self._iterator = None
+
     @overload
     @classmethod
     def from_range(cls, stop: int | Expr = 1, /, *, uid: Any = None) -> Repeat: ...
@@ -313,11 +321,7 @@ class Repeat(_ContextReader, Node):
             start, stop, step = args
         else:
             raise TypeError("Invalid arguments")
-        range_expr = _expr.FormulaExpr(
-            "range(start, stop, step)",
-            start=start, stop=stop, step=step
-        )
-        return cls(range_expr, uid=uid)
+        return cls(range(start, stop, step), uid=uid)
 
 
 class Break(Node):
