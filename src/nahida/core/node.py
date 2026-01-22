@@ -14,10 +14,8 @@ __all__ = [
     "Group"
 ]
 
-import inspect
-from inspect import _ParameterKind as PPK
-from typing import Any, overload
-from collections.abc import Callable, Iterable
+from typing import Any, overload, Literal
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 from enum import StrEnum
 
@@ -27,6 +25,7 @@ from . import expr as _expr
 
 
 type Expr = _expr.Expr
+empty = object()
 
 
 class FlowCtrl(StrEnum):
@@ -107,30 +106,19 @@ class Node(_objbase.NameMixin, _expr.RefExpr):
         context[self.uid] = values
 
 
-def get_inputs(func: Callable) -> Iterable[tuple[str, Any, bool]]:
-    """Return the node's input names and defaults."""
-    sig = inspect.signature(func)
-
-    for name, param in sig.parameters.items():
-        if param.kind in (PPK.POSITIONAL_OR_KEYWORD, PPK.KEYWORD_ONLY):
-            has_default = param.default is not param.empty
-            yield name, param.default, has_default
-        if param.kind in (PPK.POSITIONAL_ONLY, PPK.VAR_POSITIONAL):
-            raise TypeError("Positional-only parameters are not supported")
-
-
 class _ContextReader:
     """Supports read_context in a node.
 
     Introduce `_values` and `_connects` dicts for defaults and subscriptions.
     """
-    _attributes: dict[str, Expr]
+    _args: list[Expr]
+    _kwargs: dict[str, Expr]
 
-    def __init__(self, **kwargs: Expr | Any):
-        self._attributes = {}
-        self.subs(**kwargs)
+    def __init__(self) -> None:
+        self._args = []
+        self._kwargs = {}
 
-    def subs(self, **kwargs: Expr | Any) -> None:
+    def subs(self, *args: Expr | Any, **kwargs: Expr | Any) -> None:
         """Set subscriptions for attributes.
 
         An attribute may take values from other nodes or constants. Use pairs
@@ -139,28 +127,77 @@ class _ContextReader:
         tuple, list, dict or any other types that supports __getitem__.
 
         Args:
-            **kwargs (PortId | Node | Any): The attribute-source pairs.
+            *args (Expr | Any): Sources for positional attributes.
+            **kwargs (Expr | Any): The attribute-source pairs.
         """
-        for name, value in kwargs.items():
-            if _expr.is_expr(value):
-                self._attributes[name] = value
-            else:
-                self._attributes[name] = _expr.ConstExpr(value)
+        self._args.extend(
+            item if _expr.is_expr(item) else _expr.ConstExpr(item)
+            for item in args
+        )
+        self._kwargs.update(
+            {name: item if _expr.is_expr(item) else _expr.ConstExpr(item)
+             for name, item in kwargs.items()}
+        )
 
-    def unsubs(self, *names: str) -> None:
+    def unsubs(self, *attrs: int | str) -> None:
         """Remove subscriptions for attributes."""
-        for name in names:
-            self._attributes.pop(name, None)
+        for attr in attrs:
+            if isinstance(attr, str):
+                self._kwargs.pop(attr, None)
+            elif isinstance(attr, int):
+                try:
+                    self._args.pop(attr)
+                except IndexError:
+                    pass
+            else:
+                raise TypeError(f"invalid attribute index/key: {attr!r}")
 
-    def read_context(self, context: dict[int, Any], name: str) -> tuple[Any, bool]:
-        """Get value for an input from the context."""
-        if name in self._attributes:
+    def num_attributes(self, kind: Literal["P", "K", None] = None) -> int:
+        """Return the number of attributes."""
+        if kind == "P":
+            return len(self._args)
+        elif kind == "K":
+            return len(self._kwargs)
+        elif kind is None:
+            return len(self._args) + len(self._kwargs)
+        raise ValueError(f"invalid parameter kind: {kind!r}")
+
+    def keywords(self) -> Iterable[str]:
+        """Return all the keywords of attributes."""
+        return iter(self._kwargs)
+
+    def read_context(self, context: Mapping[int, Any], attr: int | str, /) -> tuple[Any, bool]:
+        """Try fetching a value for an attribute on the given context."""
+        if isinstance(attr, str) and attr in self._kwargs:
+            expr = self._kwargs[attr]
+        elif isinstance(attr, int) and attr >= -len(self._args) and attr < len(self._args):
+            expr = self._args[attr]
+        else:
+            return None, False
+
+        try:
+            return expr.eval(context), True
+        except Exception as e:
+            raise _err.SubscribeError(self, attr) from e
+
+    def read_context_all_subscriptions(self, context: Mapping[int, Any], /):
+        """Get values for all subscribed attributes on the given context."""
+        args: list[Any] = []
+        kwargs: dict[str, Any] = {}
+
+        for index, expr in enumerate(self._args):
             try:
-                return self._attributes[name].eval(context), True
+                args.append(expr.eval(context))
             except Exception as e:
-                raise _err.SubscribeError(self, name) from e
+                raise _err.SubscribeError(self, index) from e
 
-        return None, False
+        for key, expr in self._kwargs.items():
+            try:
+                kwargs[key] = expr.eval(context)
+            except Exception as e:
+                raise _err.SubscribeError(self, key) from e
+
+        return tuple(args), kwargs
 
 
 class _Recruiter:
@@ -201,33 +238,19 @@ class Execute(_Recruiter, _ContextReader, Node):
     """Computational Node object."""
     _target: Callable
 
-    def __init__(self, target: Callable, /, *, uid: Any = None):
+    def __init__(self, target: Callable[..., Any], /, *, uid: Any = None):
         Node.__init__(self, uid=uid)
         _ContextReader.__init__(self)
         _Recruiter.__init__(self)
-        sig = inspect.signature(target)
-
-        for param in sig.parameters.values():
-            if param.kind in (PPK.POSITIONAL_ONLY, PPK.VAR_POSITIONAL):
-                raise TypeError("Positional-only parameters are not supported")
-
         self._target = target
 
     def submit(self, context: dict[int, Any] = {}):
-        input_kwargs = {}
-
-        for param, _, has_default in get_inputs(self._target):
-            val, status = self.read_context(context, param)
-            if status:
-                input_kwargs[param] = val
-                continue
-            if has_default:
-                continue
-            raise _err.ParamMissingError(self, param)
+        args, kwargs = self.read_context_all_subscriptions(context)
 
         return TaskItem(
             target=self._target,
-            kwargs=input_kwargs,
+            args=args,
+            kwargs=kwargs,
             recruit=self.downstreams
         )
 
@@ -239,9 +262,10 @@ class Branch(_ContextReader, Node):
 
     def __init__(self, condition: Expr | bool = False, /, *, uid: int | None = None) -> None:
         Node.__init__(self, uid=uid)
-        _ContextReader.__init__(self, condition=condition)
+        _ContextReader.__init__(self)
         self._downstreams_true = set()
         self._downstreams_false = set()
+        self.subs(condition)
 
     @property
     def true(self):
@@ -254,7 +278,7 @@ class Branch(_ContextReader, Node):
         return _Recruiter(self._downstreams_false)
 
     def submit(self, context: dict[int, Any] = {}):
-        val, status = self.read_context(context, "condition")
+        val, status = self.read_context(context, 0)
 
         if bool(val) and status:
             return TaskItem(recruit=self._downstreams_true)
@@ -266,10 +290,11 @@ class Repeat(_ContextReader, Node):
     """Repeat the execution for multiple times."""
     def __init__(self, iterable: Expr | Iterable[Any] | None = None, *, uid: int | None = None) -> None:
         Node.__init__(self, uid=uid)
-        _ContextReader.__init__(self, iterable=iterable)
+        _ContextReader.__init__(self)
         self._downstreams_iter: set[Node] = set()
         self._downstreams_stop: set[Node] = set()
         self._iterator = None
+        self.subs(iterable)
 
     @property
     def iter(self):
@@ -283,7 +308,7 @@ class Repeat(_ContextReader, Node):
 
     def submit(self, context: dict[int, Any] = {}):
         if self._iterator is None:
-            iterable = self.read_context(context, "iterable")[0]
+            iterable = self.read_context(context, 0)[0]
             self._iterator = iter(iterable)
         try:
             current = next(self._iterator)
@@ -368,14 +393,11 @@ class Group(_Recruiter, _ContextReader, Node):
         self._func = graph.lambdify()
 
     def submit(self, context: dict[int, Any] = {}) -> TaskItem:
-        param_set = set(self._attributes.keys())
-        kwargs: dict[str, Any] = {}
-
-        for param in param_set:
-            kwargs[param] = self.read_context(context, param)[0]
+        args, kwargs = self.read_context_all_subscriptions(context)
 
         return TaskItem(
             target=self._func,
+            args=args,
             kwargs=kwargs,
             recruit=self.downstreams
         )

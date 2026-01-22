@@ -25,6 +25,10 @@ class Expr(_objbase.UIDMixin):
         """Evaluate the expression on the given context."""
         raise NotImplementedError()
 
+    def refs(self) -> set[int]:
+        """Return the UIDs of all RefExprs that this expression depends on."""
+        return set()
+
     def __call__(self, context: Mapping[int, Any], /) -> Any:
         return self.eval(context)
 
@@ -77,6 +81,9 @@ class RefExpr(Expr):
         except KeyError as e:
             raise _err.DataNotFoundError(self) from e
 
+    def refs(self) -> set[int]:
+        return {self.uid}
+
 
 class GetItemExpr(Expr):
     """Get-item expression that leverages the `__getitem__` method of another
@@ -84,20 +91,24 @@ class GetItemExpr(Expr):
 
     Raises *DataGetItemError* when failed.
     """
-    def __init__(self, expr: Expr, index: int | str, /) -> None:
+    def __init__(self, expr: Expr, index: int | str | Expr, /) -> None:
         super().__init__()
         self._expr = expr
-        self._index = index
+        self._index = _to_expr(index)
 
     def eval(self, context: Mapping[int, Any], /) -> Any:
         val = self._expr.eval(context)
+        index = self._index.eval(context)
 
         try:
-            val = val[self._index]
-        except (KeyError, IndexError) as e:
-            raise _err.DataGetItemError(type(val).__name__, self._index) from e
+            val = val[index]
+        except Exception as e:
+            raise _err.DataGetItemError(type(val).__name__, index) from e
 
         return val
+
+    def refs(self) -> set[int]:
+        return self._expr.refs() | self._index.refs()
 
 
 class UnionExpr(Expr):
@@ -129,6 +140,14 @@ class UnionExpr(Expr):
 
         raise _err.UnionError()
 
+    def refs(self) -> set[int]:
+        result: set[int] = set()
+
+        for expr in self._exprs:
+            result |= expr.refs()
+
+        return result
+
 
 class FormulaExpr(Expr):
     """Formula expression that evaluates a Python expression.
@@ -158,6 +177,14 @@ class FormulaExpr(Expr):
         except Exception as e:
             raise _err.ExprEvalError() from e
 
+    def refs(self) -> set[int]:
+        result: set[int] = set()
+
+        for loc in self._locals.values():
+            result |= loc.refs()
+
+        return result
+
 
 class FunctionExpr(Expr):
     """Function expression that returns the result of a function call.
@@ -177,6 +204,17 @@ class FunctionExpr(Expr):
             return self._func(*local_args, **local_kwargs)
         except Exception as e:
             raise _err.ExprEvalError() from e
+
+    def refs(self) -> set[int]:
+        result: set[int] = set()
+
+        for arg in self._args:
+            result |= arg.refs()
+
+        for kwarg in self._kwargs.values():
+            result |= kwarg.refs()
+
+        return result
 
 
 def expression(func: Callable[..., Any], /):
