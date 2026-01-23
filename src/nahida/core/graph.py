@@ -9,7 +9,7 @@ __all__ = [
 from threading import Thread
 from queue import Queue
 from typing import Any
-from collections.abc import Sequence, Callable
+from collections.abc import Sequence, Callable, Mapping
 
 from . import _objbase as _ob
 from . import expr as _expr
@@ -94,8 +94,8 @@ class Graph(_ob.NameMixin, _ob.UIDMixin):
 
         if exposes is None:
             return
-        elif isinstance(exposes, Node) or _expr.is_expr(exposes):
-            self._expose = self._validate_port(exposes)
+        elif isinstance(exposes, Expr):
+            self._expose = exposes
         elif isinstance(exposes, tuple):
             self._expose = tuple(map(self._validate_port, exposes))
         elif isinstance(exposes, dict):
@@ -105,19 +105,21 @@ class Graph(_ob.NameMixin, _ob.UIDMixin):
             }
         else:
             raise TypeError(
-                "Expected PortId, Node, tuple, dict, or None, "
+                "expected expressions, tuple, dict, or None, "
                 f"got {type(exposes).__name__!r}."
             )
+
+        self._construct_output = self._build_exposer(exposes)
 
     def _validate_port(self, port: Expr) -> Expr:
         if _expr.is_expr(port):
             return port
         else:
             raise TypeError(
-                f"Expected PortId or Node, got {type(port).__name__!r}."
+                f"expected expressions, got {type(port).__name__!r}."
             )
 
-    def _read_context(self, context: dict[int, Any], expr: Expr, expose_item: Any = None):
+    def _read_context(self, context: Mapping[int, Any], expr: Expr, expose_item: Any = None):
         try:
             val = expr.eval(context)
         except Exception as e:
@@ -125,32 +127,78 @@ class Graph(_ob.NameMixin, _ob.UIDMixin):
 
         return val
 
-    def _construct_output(self, context: dict[int, Any]) -> Any:
-        # Get value for an input from the context.
-        if _expr.is_expr(self._expose):
-            return self._read_context(context, self._expose)
+    def _build_exposer(
+        self,
+        exposes: Expr | tuple[Expr, ...] | dict[str, Expr] | None
+    ) -> Callable[[Mapping[int, Any]], Any]:
+        if exposes is None:
+            def _output_constructor(context): # type: ignore
+                return None
+            return _output_constructor
 
-        elif isinstance(self._expose, tuple):
-            result = []
-            for index, expr in enumerate(self._expose):
-                result.append(self._read_context(context, expr, index))
-            return tuple(result)
+        elif isinstance(exposes, Expr):
+            exposed_exprs = exposes
+            def _output_constructor(context): # type: ignore
+                return self._read_context(context, exposes)
+            return _output_constructor
 
-        elif isinstance(self._expose, dict):
-            result = {}
-            for key, expr in self._expose.items():
-                result[key] = self._read_context(context, expr, key)
-            return result
+        elif isinstance(exposes, tuple):
+            exposed_exprs = tuple(map(self._validate_port, exposes))
+            def _output_constructor(context): # type: ignore
+                return tuple(
+                    self._read_context(context, expr, index)
+                    for index, expr in enumerate(exposed_exprs)
+                )
+            return _output_constructor
 
-        return None
+        elif isinstance(exposes, dict):
+            exposed_exprs = {
+                key: self._validate_port(value)
+                for key, value in exposes.items()
+            }
+            def _output_constructor(context):
+                return {
+                    key: self._read_context(context, value, key)
+                    for key, value in exposed_exprs.items()
+                }
+            return _output_constructor
 
-    def input(self, name: str | int | None = None) -> Expr:
-        expr = _expr.simple_fetcher(self.uid)
+        else:
+            raise TypeError(
+                "expected expressions, tuple, dict, or None, "
+                f"got {type(exposes).__name__!r}."
+            )
 
-        if name is not None:
-            expr = expr[name]
+    def lambdify(self, *, forward: ForwardFunc | None = None):
+        """Transform the graph to a lambda function.
 
-        return expr
+        Args:
+            forward (Callable): The forward method of a scheduler to be injected.
+                It should receives a context and a sequence of starters, and
+                returns the result context (inplace operations allowed).
+                Defaults to `None`, using the global default scheduler.
+
+        Returns:
+            Callable: The lambda function.
+        """
+        def runner(*args, **kwargs):
+            if args or kwargs:
+                initial: dict[int | str, Any] = {}
+                initial.update(enumerate(args))
+                initial.update(kwargs)
+                context = {self.uid: initial}
+            else:
+                context = {}
+
+            _forward = forward or execute
+            context = _forward(context, self._starters)
+            return self._construct_output(context)
+
+        return runner
+
+    @property
+    def input(self) -> Expr:
+        return _expr.simple_fetcher(self.uid)
 
     def run(
         self,

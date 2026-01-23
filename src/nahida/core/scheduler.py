@@ -13,7 +13,7 @@ from .executor import WorkID, Executor
 @dataclass(slots=True)
 class NodeScope:
     count: int = 1
-    exiter: Node | None = None
+    recall: Node | None = None
     back_id: int | None = None
     cancelled: bool = False
 
@@ -32,9 +32,9 @@ class ScopeManager:
         except KeyError:
             raise ValueError(f"invalid scope id {item}")
 
-    def create_scope(self, back_id: int, exiter: Node) -> int:
+    def create_scope(self, back_id: int, recall: Node) -> int:
         new_id = self._scope_count
-        new_scope = NodeScope(0, exiter, back_id)
+        new_scope = NodeScope(0, recall, back_id)
         self.scope_table[new_id] = new_scope
         self._scope_count += 1
         return new_id
@@ -55,12 +55,12 @@ class ScopeManager:
         scope = self.scope_table[scope_id]
         return scope.count < 1 or scope.cancelled == True
 
-    def resolve_exit(self, scope_id: int) -> tuple[Node, int] | None:
+    def get_recall(self, scope_id: int) -> tuple[Node, int] | None:
         scope = self[scope_id]
 
-        if scope.exiter is not None:
-            assert scope.back_id is not None, "back_id cannot be None if exiter was specified"
-            return scope.exiter, scope.back_id
+        if scope.recall is not None:
+            assert scope.back_id is not None, "back_id cannot be None if recall was specified"
+            return scope.recall, scope.back_id
 
 
 class Scheduler:
@@ -96,10 +96,9 @@ class Scheduler:
                 task_item = node.submit(context)
 
                 if task_item.target is None:
-                    self._schedule_downstreams(
+                    self._recruit_downstreams_and_recall_if_scope_done(
                         ready_nodes, scope_manager, task_item, node, scope_id
                     )
-                    self._check_and_exit_scope(ready_nodes, scope_manager, scope_id)
                     continue
 
                 wid = self.executor.submit(task_item.target, *task_item.args, **task_item.kwargs)
@@ -120,20 +119,18 @@ class Scheduler:
 
                 if event.is_success():
                     node.write(context, event.value)
-                    self._schedule_downstreams(
+                    self._recruit_downstreams_and_recall_if_scope_done(
                         ready_nodes, scope_manager, task_item, node, scope_id
                     )
-                elif event.is_failed():
+                elif event.is_failed() or event.is_cancelled():
                     scope_manager.on_node_complete(scope_id)
-                elif event.is_cancelled():
-                    scope_manager.on_node_complete(scope_id)
-
-                self._check_and_exit_scope(ready_nodes, scope_manager, scope_id)
+                    self._recall_if_scope_done(ready_nodes, scope_manager, scope_id)
 
         return context
 
-    @staticmethod
-    def _schedule_downstreams(
+    @classmethod
+    def _recruit_downstreams_and_recall_if_scope_done(
+        cls,
         ready_nodes: deque[tuple[Node, int]],
         scope_manager: ScopeManager,
         task_item: TaskItem,
@@ -149,6 +146,11 @@ class Scheduler:
 
         elif task_item.control == FlowCtrl.EXIT:
             scope_manager.cancel_scope(scope_id)
+            recall_and_back_id = scope_manager.get_recall(scope_id)
+
+            if recall_and_back_id:
+                recall, scope_id = recall_and_back_id
+                recall.exit()
 
         elif task_item.control == FlowCtrl.NONE:
             scope_manager.on_node_complete(scope_id)
@@ -161,14 +163,17 @@ class Scheduler:
             for nxt in task_item.recruit:
                 ready_nodes.append((nxt, scope_id))
 
-    @staticmethod
-    def _check_and_exit_scope(
+        cls._recall_if_scope_done(ready_nodes, scope_manager, scope_id)
+
+    @classmethod
+    def _recall_if_scope_done(
+        cls,
         ready_nodes: deque[tuple[Node, int]],
         scope_manager: ScopeManager,
         scope_id: int
     ):
         if scope_manager.check_scope_done(scope_id):
-            exiter_and_back_id = scope_manager.resolve_exit(scope_id)
+            recall_and_back_id = scope_manager.get_recall(scope_id)
 
-            if exiter_and_back_id:
-                ready_nodes.append(exiter_and_back_id)
+            if recall_and_back_id:
+                ready_nodes.append(recall_and_back_id)
