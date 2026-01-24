@@ -9,16 +9,18 @@ __all__ = [
 from threading import Thread
 from queue import Queue
 from typing import Any
-from collections.abc import Sequence, Callable, Mapping
+from collections.abc import Sequence, Callable
 
 from . import _objbase as _ob
 from . import expr as _expr
 from . import errors as _err
+from .context import Context
 from .node import Node, FlowCtrl as _FC
+from .scheduler import Scheduler
 
 Expr = _expr.Expr
 
-type ForwardFunc = Callable[[dict[int, Any], Sequence[Node]], dict[int, Any]]
+type ForwardFunc = Callable[[Context, Sequence[Node]], Context]
 
 
 def execute(
@@ -119,7 +121,7 @@ class Graph(_ob.NameMixin, _ob.UIDMixin):
                 f"expected expressions, got {type(port).__name__!r}."
             )
 
-    def _read_context(self, context: Mapping[int, Any], expr: Expr, expose_item: Any = None):
+    def _read_context(self, context: Context, expr: Expr, expose_item: Any = None):
         try:
             val = expr.eval(context)
         except Exception as e:
@@ -130,7 +132,7 @@ class Graph(_ob.NameMixin, _ob.UIDMixin):
     def _build_exposer(
         self,
         exposes: Expr | tuple[Expr, ...] | dict[str, Expr] | None
-    ) -> Callable[[Mapping[int, Any]], Any]:
+    ) -> Callable[[Context], Any]:
         if exposes is None:
             def _output_constructor(context): # type: ignore
                 return None
@@ -169,12 +171,12 @@ class Graph(_ob.NameMixin, _ob.UIDMixin):
                 f"got {type(exposes).__name__!r}."
             )
 
-    def lambdify(self, *, forward: ForwardFunc | None = None):
+    def lambdify(self, *, scheduler: Scheduler | None = None):
         """Transform the graph to a lambda function.
 
         Args:
-            forward (Callable): The forward method of a scheduler to be injected.
-                It should receives a context and a sequence of starters, and
+            scheduler (Scheduler): The forward method of a scheduler should
+                receives a context and a sequence of starters, and
                 returns the result context (inplace operations allowed).
                 Defaults to `None`, using the global default scheduler.
 
@@ -182,42 +184,24 @@ class Graph(_ob.NameMixin, _ob.UIDMixin):
             Callable: The lambda function.
         """
         def runner(*args, **kwargs):
+            context = Context()
             if args or kwargs:
                 initial: dict[int | str, Any] = {}
                 initial.update(enumerate(args))
                 initial.update(kwargs)
-                context = {self.uid: initial}
-            else:
-                context = {}
+                context.write(self.uid, initial)
 
-            _forward = forward or execute
-            context = _forward(context, self._starters)
+            if scheduler is None:
+                raise NotImplementedError # TODO: use the global
+
+            context = scheduler.forward(context, self._starters)
             return self._construct_output(context)
 
         return runner
 
     @property
-    def input(self) -> Expr:
-        return _expr.simple_fetcher(self.uid)
-
-    def run(
-        self,
-        args: tuple[Any, ...] = (),
-        kwargs: dict[str, Any] = {},
-        *,
-        forward: ForwardFunc | None = None
-    ):
-        if args or kwargs:
-            initial: dict[int | str, Any] = {}
-            initial.update(enumerate(args))
-            initial.update(kwargs)
-            context = {self.uid: initial}
-        else:
-            context = {}
-
-        _forward = forward or execute
-        context = _forward(context, self._starters)
-        return self._construct_output(context)
+    def input(self):
+        return _expr.VariableExpr(self.uid)
 
 
 class GraphThread(Thread):

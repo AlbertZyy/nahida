@@ -11,7 +11,7 @@ __all__ = [
     "Repeat",
     "Break",
     "Join",
-    "Group"
+    # "Group"
 ]
 
 from typing import Any, overload, Literal
@@ -20,6 +20,7 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 
 from . import _objbase
+from . import context as _ctx
 from . import errors as _err
 from . import expr as _expr
 
@@ -47,9 +48,9 @@ class TaskItem:
 
     See `Node.submit` for details.
     """
-    target: Callable | None = None
-    args: tuple[Any, ...] = field(default_factory=tuple)
-    kwargs: dict[str, Any] = field(default_factory=dict)
+    source: int | str | None = None
+    args: tuple[Expr, ...] = field(default_factory=tuple)
+    kwargs: dict[str, Expr] = field(default_factory=dict)
     recruit: set[Node] | None = None
     control: FlowCtrl = FlowCtrl.NONE
 
@@ -70,7 +71,7 @@ class Node(_objbase.NameMixin, _expr.RefExpr):
     def __init__(self, *, uid: int | None = None) -> None:
         _expr.Expr.__init__(self, uid=uid)
 
-    def submit(self, context: dict[int, Any]) -> TaskItem:
+    def submit(self, context: _ctx.Context) -> TaskItem:
         """Return a task to be submitted to the task queue.
 
         A task item is a dataclass containing the following fields:
@@ -96,14 +97,14 @@ class Node(_objbase.NameMixin, _expr.RefExpr):
         another node."""
         return
 
-    def write(self, context: dict[int, Any], values: Any) -> None:
+    def write(self, context: _ctx.Context, value: Any) -> None:
         """Put output values into the context.
 
         Args:
             context (dict[int, Any]): The context of the environment.
-            values (Any): The values to be put into the context.
+            value (Any): The values to be put into the context.
         """
-        context[self.uid] = values
+        context.write(self.uid, value)
 
 
 class _ContextReader:
@@ -176,7 +177,7 @@ class _ContextReader:
         subscriptions."""
         return iter(self._kwargs)
 
-    def read_context(self, context: Mapping[int, Any], attr: int | str, /) -> tuple[Any, bool]:
+    def read_context(self, context: _ctx.Context, attr: int | str, /) -> tuple[Any, bool]:
         """Try fetching a value for an attribute on the given context."""
         if isinstance(attr, str) and attr in self._kwargs:
             expr = self._kwargs[attr]
@@ -186,11 +187,11 @@ class _ContextReader:
             return None, False
 
         try:
-            return expr.eval(context), True
+            return expr.eval(context.view(expr.refs())), True
         except Exception as e:
             raise _err.SubscribeError(self, attr) from e
 
-    def read_context_all_subscriptions(self, context: Mapping[int, Any], /):
+    def read_context_all_subscriptions(self, context: _ctx.Context, /):
         """Get values for all subscribed attributes on the given context."""
         args: list[Any] = []
         kwargs: dict[str, Any] = {}
@@ -268,21 +269,19 @@ class _Recruiter:
 
 class Execute(_Recruiter, _ContextReader, Node):
     """Computational Node object."""
-    _target: Callable
+    _source: int | str
 
-    def __init__(self, target: Callable[..., Any], /, *, uid: Any = None):
+    def __init__(self, source: int | str, /, *, uid: Any = None):
         Node.__init__(self, uid=uid)
         _ContextReader.__init__(self)
         _Recruiter.__init__(self)
-        self._target = target
+        self._source = source
 
-    def submit(self, context: dict[int, Any]):
-        args, kwargs = self.read_context_all_subscriptions(context)
-
+    def submit(self, context: _ctx.Context):
         return TaskItem(
-            target=self._target,
-            args=args,
-            kwargs=kwargs,
+            source=self._source,
+            args=tuple(self._args),
+            kwargs=self._kwargs,
             recruit=self.downstream_nodes()
         )
 
@@ -306,7 +305,7 @@ class Branch(_ContextReader, Node):
         """Execute downstream nodes when condition is False."""
         return self._downstreams_false
 
-    def submit(self, context: dict[int, Any]):
+    def submit(self, context: _ctx.Context):
         val, status = self.read_context(context, 0)
 
         if bool(val) and status:
@@ -335,7 +334,7 @@ class Repeat(_ContextReader, Node):
         """Execute downstream nodes when the loop is stopped."""
         return self._downstreams_stop
 
-    def submit(self, context: dict[int, Any]):
+    def submit(self, context: _ctx.Context):
         if self._iterator is None:
             iterable = self.read_context(context, 0)[0]
             self._iterator = iter(iterable)
@@ -380,7 +379,7 @@ class Repeat(_ContextReader, Node):
 
 class Break(_Recruiter, Node):
     """Break the repeat loop."""
-    def submit(self, context: dict[int, Any]):
+    def submit(self, context: _ctx.Context):
         return TaskItem(recruit=self.downstream_nodes(), control=FlowCtrl.EXIT)
 
 
@@ -392,7 +391,7 @@ class Join(_Recruiter, Node):
         self.receivers = tuple(Join.Receiver(self, i) for i in range(num))
         self.flags = [False] * num
 
-    def submit(self, context: dict[int, Any]) -> TaskItem:
+    def submit(self, context: _ctx.Context) -> TaskItem:
         if all(self.flags):
             self.flags = [False] * len(self.receivers)
             return TaskItem(recruit=self.downstream_nodes())
@@ -405,28 +404,28 @@ class Join(_Recruiter, Node):
             self.parent = parent
             self.index = index
 
-        def submit(self, context: dict[int, Any]):
+        def submit(self, context: _ctx.Context):
             self.parent.flags[self.index] = True
             return TaskItem(recruit={self.parent,})
 
 
-class Group(_Recruiter, _ContextReader, Node):
-    """Node group that runs an internal graph."""
-    def __init__(self, graph, values: dict[str, Any], *, uid: Any = None):
-        Node.__init__(self, uid=uid)
-        _ContextReader.__init__(self, **values)
-        _Recruiter.__init__(self)
-        from .graph import Graph
-        assert isinstance(graph, Graph), "invalid graph"
-        self._graph = graph
-        self._func = graph.lambdify()
+# class Group(_Recruiter, _ContextReader, Node):
+#     """Node group that runs an internal graph."""
+#     def __init__(self, graph, values: dict[str, Any], *, uid: Any = None):
+#         Node.__init__(self, uid=uid)
+#         _ContextReader.__init__(self, **values)
+#         _Recruiter.__init__(self)
+#         from .graph import Graph
+#         assert isinstance(graph, Graph), "invalid graph"
+#         self._graph = graph
+#         self._func = graph.lambdify()
 
-    def submit(self, context: dict[int, Any]) -> TaskItem:
-        args, kwargs = self.read_context_all_subscriptions(context)
+#     def submit(self, context: dict[int, Any]) -> TaskItem:
+#         args, kwargs = self.read_context_all_subscriptions(context)
 
-        return TaskItem(
-            target=self._func,
-            args=args,
-            kwargs=kwargs,
-            recruit=self.downstream_nodes()
-        )
+#         return TaskItem(
+#             target=self._func,
+#             args=args,
+#             kwargs=kwargs,
+#             recruit=self.downstream_nodes()
+#         )

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from  typing import Any, overload
+
 __all__ = ["UIDMixin", "has_entity", "get_entity", "NameMixin"]
 
 
@@ -39,14 +41,18 @@ def has_entity(uid: int, type_check: type | None = None, /) -> bool:
     return False
 
 
-def get_entity[T](uid: int, type_guard: type[T], /) -> T:
+@overload
+def get_entity(uid: int, /) -> Any: ...
+@overload
+def get_entity[T](uid: int, type_guard: type[T], /) -> T: ...
+def get_entity(uid: int, type_guard: type | None = None, /) -> Any:
     """Get an entity by its global UID."""
     obj = UIDMixin._uid_registry.get(uid, None)
 
     if not obj:
         raise KeyError(f"entity with uid {uid} not found.")
 
-    if not isinstance(obj, type_guard):
+    if type_guard and not isinstance(obj, type_guard):
         raise TypeError(f"entity with uid {uid} is not an instance of {type_guard.__name__!r}.")
 
     return obj

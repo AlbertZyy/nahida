@@ -2,10 +2,11 @@ from __future__ import annotations
 
 __all__ = ["Scheduler"]
 
-from typing import Any, Sequence
+from typing import Sequence
 from dataclasses import dataclass
 from collections import deque
 
+from .context import Context
 from .node import FlowCtrl, Node, TaskItem
 from .executor import WorkID, Executor
 
@@ -73,7 +74,7 @@ class Scheduler:
         self.executor = executor
         self.max_inflight = max_inflight
 
-    def forward(self, context: dict[int, Any], starters: Sequence[Node]) -> dict[int, Any]:
+    def forward(self, context: Context, starters: Sequence[Node]) -> Context:
         """Forward computation of a node graph.
 
         Args:
@@ -81,6 +82,7 @@ class Scheduler:
                 inputs and write their outputs.
             starters (Sequence of Node): The starting nodes.
         """
+        from itertools import chain
         # TODO: add checking for circular dependencies!
         scope_manager = ScopeManager(len(starters))
         ready_nodes: deque[tuple[Node, int]] = deque()
@@ -95,13 +97,20 @@ class Scheduler:
                 node, scope_id = ready_nodes.popleft()
                 task_item = node.submit(context)
 
-                if task_item.target is None:
+                if task_item.source is None:
                     self._recruit_downstreams_and_recall_if_scope_done(
                         ready_nodes, scope_manager, task_item, node, scope_id
                     )
                     continue
 
-                wid = self.executor.submit(task_item.target, *task_item.args, **task_item.kwargs)
+                uid_set: set[int] = set()
+                for expr in chain(task_item.args, task_item.kwargs.values()):
+                    uid_set |= expr.refs()
+
+                wid = self.executor.submit(
+                    task_item.source, context.view(uid_set),
+                    *task_item.args, **task_item.kwargs
+                )
                 inflight[wid] = (node, scope_id, task_item)
 
             if len(inflight) == 0:
