@@ -152,8 +152,17 @@ class _ContextReader:
             else:
                 raise TypeError(f"invalid attribute index/key: {attr!r}")
 
-    def num_attributes(self, kind: Literal["P", "K", None] = None) -> int:
-        """Return the number of attributes."""
+    def numattr(self, kind: Literal["P", "K", None] = None) -> int:
+        """Return the number of attribute subscriptions.
+
+        Args:
+            kind (Literal["P", "K"] | None): The kind of attributes to count.
+                "P" for positional attributes, "K" for keyword attributes,
+                None for all attributes. Defaults to all attributes.
+
+        Returns:
+            int: The number of attributes.
+        """
         if kind == "P":
             return len(self._args)
         elif kind == "K":
@@ -163,7 +172,8 @@ class _ContextReader:
         raise ValueError(f"invalid parameter kind: {kind!r}")
 
     def keywords(self) -> Iterable[str]:
-        """Return all the keywords of attributes."""
+        """Return an iterable of all the keywords of attributes that having
+        subscriptions."""
         return iter(self._kwargs)
 
     def read_context(self, context: Mapping[int, Any], attr: int | str, /) -> tuple[Any, bool]:
@@ -206,12 +216,13 @@ class _Recruiter:
     Introduce `_downstreams` list for downstream nodes.
     `link` and `unlink` are available for manage downstream nodes.
     """
-    _downstreams: set[Node]
+    _downstreams: set[int]
 
-    def __init__(self, downstream: set[Node] | None = None, /):
+    def __init__(self, downstream: set[int] | None = None, /):
         if downstream is None:
-            downstream = set()
-        self._downstreams = downstream
+            self._downstreams = set()
+        else:
+            self._downstreams = set(downstream)
 
     def link(self, *other: Node) -> None:
         """Add downstream nodes to be recruited after execution.
@@ -219,18 +230,39 @@ class _Recruiter:
         Args:
             *other (Node): The downstream nodes to be added.
         """
-        self._downstreams.update(other)
+        self._downstreams.update(node.uid for node in other)
+
+    def linkuid(self, *uid: int) -> None:
+        """Add downstream nodes to be recruited after execution.
+
+        Args:
+            *uid (int): The UIDs of downstream nodes to be added.
+        """
+        self._downstreams.update(uid)
 
     def unlink(self, *other: Node) -> None:
-        """Remove downstream nodes. Do nothing for non-existent nodes.
+        """Remove downstream nodes. Do nothing for unlinked nodes.
 
         Args:
             *other (Node): The downstream nodes to be removed.
         """
-        self._downstreams.difference_update(other)
+        self._downstreams.difference_update(node.uid for node in other)
+
+    def unlinkuid(self, *uid: int) -> None:
+        """Remove downstream nodes. Do nothing for unlinked UIDs.
+
+        Args:
+            *uid (int): The UIDs of downstream nodes to be removed.
+        """
+        self._downstreams.difference_update(uid)
+
+    def downstream_nodes(self) -> set[Node]:
+        """Return downstream nodes."""
+        return set(_objbase.get_entity(uid, Node) for uid in self._downstreams)
 
     @property
-    def downstreams(self) -> set[Node]:
+    def downstreams(self) -> set[int]:
+        """Return downstream node UIDs."""
         return self._downstreams
 
 
@@ -244,46 +276,43 @@ class Execute(_Recruiter, _ContextReader, Node):
         _Recruiter.__init__(self)
         self._target = target
 
-    def submit(self, context: dict[int, Any] = {}):
+    def submit(self, context: dict[int, Any]):
         args, kwargs = self.read_context_all_subscriptions(context)
 
         return TaskItem(
             target=self._target,
             args=args,
             kwargs=kwargs,
-            recruit=self.downstreams
+            recruit=self.downstream_nodes()
         )
 
 
 class Branch(_ContextReader, Node):
     """Branch the execution based on a condition."""
-    _downstreams_true: set[Node]
-    _downstreams_false: set[Node]
-
     def __init__(self, condition: Expr | bool = False, /, *, uid: int | None = None) -> None:
         Node.__init__(self, uid=uid)
         _ContextReader.__init__(self)
-        self._downstreams_true = set()
-        self._downstreams_false = set()
+        self._downstreams_true = _Recruiter()
+        self._downstreams_false = _Recruiter()
         self.subs(condition)
 
     @property
     def true(self):
         """Execute downstream nodes when condition is True."""
-        return _Recruiter(self._downstreams_true)
+        return self._downstreams_true
 
     @property
     def false(self):
         """Execute downstream nodes when condition is False."""
-        return _Recruiter(self._downstreams_false)
+        return self._downstreams_false
 
-    def submit(self, context: dict[int, Any] = {}):
+    def submit(self, context: dict[int, Any]):
         val, status = self.read_context(context, 0)
 
         if bool(val) and status:
-            return TaskItem(recruit=self._downstreams_true)
+            return TaskItem(recruit=self.true.downstream_nodes())
         else:
-            return TaskItem(recruit=self._downstreams_false)
+            return TaskItem(recruit=self.false.downstream_nodes())
 
 
 class Repeat(_ContextReader, Node):
@@ -291,22 +320,22 @@ class Repeat(_ContextReader, Node):
     def __init__(self, iterable: Expr | Iterable[Any] | None = None, *, uid: int | None = None) -> None:
         Node.__init__(self, uid=uid)
         _ContextReader.__init__(self)
-        self._downstreams_iter: set[Node] = set()
-        self._downstreams_stop: set[Node] = set()
+        self._downstreams_iter = _Recruiter()
+        self._downstreams_stop = _Recruiter()
         self._iterator = None
         self.subs(iterable)
 
     @property
     def iter(self):
         """Execute downstream nodes repeatedly."""
-        return _Recruiter(self._downstreams_iter)
+        return self._downstreams_iter
 
     @property
     def stop(self):
         """Execute downstream nodes when the loop is stopped."""
-        return _Recruiter(self._downstreams_stop)
+        return self._downstreams_stop
 
-    def submit(self, context: dict[int, Any] = {}):
+    def submit(self, context: dict[int, Any]):
         if self._iterator is None:
             iterable = self.read_context(context, 0)[0]
             self._iterator = iter(iterable)
@@ -315,13 +344,13 @@ class Repeat(_ContextReader, Node):
         except StopIteration:
             self._iterator = None
             return TaskItem(
-                recruit=self._downstreams_stop,
+                recruit=self.stop.downstream_nodes(),
                 control=FlowCtrl.NONE
             )
         self.write(context, (current,))
 
         return TaskItem(
-            recruit=self._downstreams_iter,
+            recruit=self.iter.downstream_nodes(),
             control=FlowCtrl.ENTER
         )
 
@@ -351,8 +380,8 @@ class Repeat(_ContextReader, Node):
 
 class Break(_Recruiter, Node):
     """Break the repeat loop."""
-    def submit(self, context: dict[int, Any] = {}):
-        return TaskItem(recruit=self.downstreams, control=FlowCtrl.EXIT)
+    def submit(self, context: dict[int, Any]):
+        return TaskItem(recruit=self.downstream_nodes(), control=FlowCtrl.EXIT)
 
 
 class Join(_Recruiter, Node):
@@ -363,10 +392,10 @@ class Join(_Recruiter, Node):
         self.receivers = tuple(Join.Receiver(self, i) for i in range(num))
         self.flags = [False] * num
 
-    def submit(self, context: dict[int, Any] = {}) -> TaskItem:
+    def submit(self, context: dict[int, Any]) -> TaskItem:
         if all(self.flags):
             self.flags = [False] * len(self.receivers)
-            return TaskItem(recruit=self.downstreams)
+            return TaskItem(recruit=self.downstream_nodes())
         else:
             return TaskItem()
 
@@ -376,7 +405,7 @@ class Join(_Recruiter, Node):
             self.parent = parent
             self.index = index
 
-        def submit(self, context: dict[int, Any] = {}):
+        def submit(self, context: dict[int, Any]):
             self.parent.flags[self.index] = True
             return TaskItem(recruit={self.parent,})
 
@@ -392,12 +421,12 @@ class Group(_Recruiter, _ContextReader, Node):
         self._graph = graph
         self._func = graph.lambdify()
 
-    def submit(self, context: dict[int, Any] = {}) -> TaskItem:
+    def submit(self, context: dict[int, Any]) -> TaskItem:
         args, kwargs = self.read_context_all_subscriptions(context)
 
         return TaskItem(
             target=self._func,
             args=args,
             kwargs=kwargs,
-            recruit=self.downstreams
+            recruit=self.downstream_nodes()
         )
