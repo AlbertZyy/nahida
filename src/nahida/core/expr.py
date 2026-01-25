@@ -58,7 +58,7 @@ class VariableExpr(Expr):
 
     def eval(self, context: Context, /) -> Any:
         try:
-            return context.read(self._target_uid)
+            return context[self._target_uid].get()
         except KeyError as e:
             raise _err.DataNotFoundError(self._target_uid) from e
 
@@ -75,7 +75,7 @@ class VariablGetItemExpr(Expr):
     def eval(self, context: Context, /) -> Any:
         try:
             index = self._index.eval(context)
-            return context.read(self._target_uid, index)
+            return context[self._target_uid].get(index)
         except KeyError as e:
             raise _err.DataNotFoundError(self._target_uid) from e
 
@@ -104,9 +104,9 @@ class RefExpr(Expr):
 
     def eval(self, context: Context, /) -> Any:
         try:
-            return context.read(self.uid)
+            return context[self.uid].get()
         except KeyError as e:
-            raise _err.DataNotFoundError(self) from e
+            raise _err.DataNotFoundError(self.uid) from e
 
     def refs(self) -> set[int]:
         return {self.uid}

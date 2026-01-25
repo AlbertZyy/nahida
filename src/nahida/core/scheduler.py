@@ -1,6 +1,9 @@
 from __future__ import annotations
 
-__all__ = ["Scheduler", "ConcurrentScheduler"]
+__all__ = [
+    "Scheduler",
+    "ConcurrentScheduler"
+]
 
 from typing import Sequence
 from dataclasses import dataclass
@@ -129,9 +132,9 @@ class ConcurrentScheduler(Scheduler):
                     break
             else:
                 node, scope_id, task_item = inflight.pop(event.work_id)
-
                 if event.is_success():
-                    node.write(context, event.value)
+                    if event.value is not None:
+                        context[node.uid] = event.value
                     self._recruit_downstreams_and_recall_if_scope_done(
                         ready_nodes, scope_manager, task_item, node, scope_id
                     )

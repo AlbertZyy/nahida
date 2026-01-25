@@ -97,15 +97,6 @@ class Node(_objbase.NameMixin, _expr.RefExpr):
         another node."""
         return
 
-    def write(self, context: _ctx.Context, value: Any) -> None:
-        """Put output values into the context.
-
-        Args:
-            context (dict[int, Any]): The context of the environment.
-            value (Any): The values to be put into the context.
-        """
-        context.write(self.uid, value)
-
 
 class _ContextReader:
     """Supports read_context in a node.
@@ -356,7 +347,7 @@ class Repeat(_ContextReader, Node):
                 recruit=self.stop.downstream_nodes(),
                 control=FlowCtrl.NONE
             )
-        self.write(context, (current,))
+        context[self.uid] = _ctx.DataRef((current,))
 
         return TaskItem(
             recruit=self.iter.downstream_nodes(),

@@ -13,7 +13,7 @@ from collections.abc import Sequence, Callable
 from . import _objbase as _ob
 from . import expr as _expr
 from . import errors as _err
-from .context import Context
+from .context import Context, DataRef
 from .node import Node
 from .scheduler import Scheduler
 from .executor import Executor
@@ -121,6 +121,7 @@ class Graph(_ob.NameMixin, _ob.UIDMixin):
     def lambdify(
         self,
         *,
+        data_refer: type[DataRef] = DataRef,
         scheduler: Scheduler | None = None,
         executor: Executor | None = None
     ):
@@ -146,7 +147,7 @@ class Graph(_ob.NameMixin, _ob.UIDMixin):
                 initial: dict[int | str, Any] = {}
                 initial.update(enumerate(args))
                 initial.update(kwargs)
-                context.write(self.uid, initial)
+                context[self.uid] = data_refer(initial)
 
             context = scheduler.forward(context, self._starters, executor=executor)
             return self._construct_output(context)

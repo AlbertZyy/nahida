@@ -1,6 +1,5 @@
 
 __all__ = [
-    "WorkID",
     "ErrorInfo",
     "WorkEvent",
     "Executor",
@@ -15,11 +14,11 @@ import traceback
 from queue import SimpleQueue
 import uuid
 
-from .context import Context
+from .context import Context, DataRef
 from .expr import Expr
 
 
-WorkID = NewType("WorkID", int)
+WorkID = NewType("WorkID", str)
 
 @dataclass(slots=True, frozen=True)
 class _WorkItem:
@@ -52,7 +51,7 @@ class ErrorInfo:
 class WorkEvent:
     work_id: WorkID | None
     status: WorkStatus
-    value: Any | None = None
+    value: DataRef | None = None
     error_info: ErrorInfo | None = None
 
     def is_success(self) -> bool:
@@ -110,7 +109,16 @@ class Executor:
         raise NotImplementedError
 
     def wait(self) -> WorkEvent:
-        """Wait for the next work event."""
+        """Wait for the next work event.
+
+        Returns:
+            WorkEvent: an dataclass containing
+            - work_id (int | None): The work ID returned by `submit`.
+            - status (WorkStatus): success, failed, cancelled or shutdown.
+            - value (DataRef | None): Data reference of the returned result.
+                Ready for being put back into a context, or directly get the value.
+            - error_info (ErrorInfo | None): Error information.
+        """
         raise NotImplementedError
 
     def cancel(self, work_id: WorkID, /) -> bool:
@@ -124,6 +132,11 @@ class Executor:
 
 class ThreadPoolExecutor(Executor):
     def __init__(self, max_workers: int | None = None) -> None:
+        """A thread pool executor.
+
+        Args:
+            max_workers (int | None, optional): Max number of workers.
+        """
         from concurrent.futures import ThreadPoolExecutor as _TPE, Future
         self._event_queue: SimpleQueue[WorkEvent] = SimpleQueue()
         self._executor = _TPE(max_workers)
@@ -149,7 +162,7 @@ class ThreadPoolExecutor(Executor):
             event = WorkEvent(
                 work_id=work_item.uid,
                 status=WorkStatus.SUCCESS,
-                value=result
+                value=DataRef(result)
             )
         except Exception as e:
             event = WorkEvent(
@@ -171,7 +184,7 @@ class ThreadPoolExecutor(Executor):
         *args: Expr,
         **kwargs: Expr
     ) -> WorkID:
-        work_id = WorkID(int(uuid.uuid4()))
+        work_id = WorkID(str(uuid.uuid4()))
         work_item = _WorkItem(work_id, source, context, args, kwargs) # TODO: error traceback field
         fut = self._executor.submit(
             self._worker, self._event_queue, work_item
