@@ -49,7 +49,7 @@ def is_expr(obj: Any, /) -> TypeGuard[Expr]:
 
 
 class VariableExpr(Expr):
-    def __init__(self, target_uid: int) -> None:
+    def __init__(self, target_uid: int, /) -> None:
         super().__init__()
         self._target_uid = target_uid
 
@@ -67,7 +67,7 @@ class VariableExpr(Expr):
 
 
 class VariablGetItemExpr(Expr):
-    def __init__(self, target_uid: int, index: Any) -> None:
+    def __init__(self, target_uid: int, index: Any, /) -> None:
         super().__init__()
         self._target_uid = target_uid
         self._index = _to_expr(index)
@@ -218,9 +218,8 @@ class FunctionExpr(Expr):
 
     Raises *ExprEvalError* when the evaluation failed.
     """
-    def __init__(self, func: Callable[..., Any], /, *args: Expr, **kwargs: Expr) -> None:
-        super().__init__()
-        self._func = func
+    def __init__(self, fid: int, /, *args: Expr, **kwargs: Expr) -> None:
+        self._fid = fid
         self._args = args
         self._kwargs = kwargs
 
@@ -228,7 +227,9 @@ class FunctionExpr(Expr):
         local_args = [arg.eval(context) for arg in self._args]
         local_kwargs = {name: value.eval(context) for name, value in self._kwargs.items()}
         try:
-            return self._func(*local_args, **local_kwargs)
+            from .executor import Executor
+            fn = Executor._callable_registry[self._fid]
+            return fn(*local_args, **local_kwargs)
         except Exception as e:
             raise _err.ExprEvalError() from e
 
@@ -242,9 +243,3 @@ class FunctionExpr(Expr):
             result |= kwarg.refs()
 
         return result
-
-
-def expression(func: Callable[..., Any], /):
-    """A decorator that transforms a function into an expression operator."""
-    from functools import partial
-    return partial(FunctionExpr, func)

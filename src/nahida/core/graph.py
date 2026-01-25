@@ -1,7 +1,6 @@
 # nahida/core/graph.py
 
 __all__ = [
-    "execute",
     "Graph",
     "GraphThread"
 ]
@@ -15,65 +14,13 @@ from . import _objbase as _ob
 from . import expr as _expr
 from . import errors as _err
 from .context import Context
-from .node import Node, FlowCtrl as _FC
+from .node import Node
 from .scheduler import Scheduler
+from .executor import Executor
 
 Expr = _expr.Expr
 
 type ForwardFunc = Callable[[Context, Sequence[Node]], Context]
-
-
-def execute(
-    context: dict[int, Any], starters: Sequence[Node]
-) -> dict[int, Any]:
-    """Execute nodes with given inputs.
-
-    Args:
-        context (dict[int, Any]): Running context.
-        starters (Sequence of Node): The starting nodes to execute.
-
-    Returns:
-        dict: The remaining context, mapping from PortId to their values.
-    """
-    exec_stack: list[Node] = list(starters)
-    loop_stack: list[Node] = []
-    trace_stack: list[set[int]] = [{id(node)} for node in exec_stack]
-    breaking = False
-
-    while exec_stack:
-        node = exec_stack.pop()
-        trace = trace_stack.pop()
-
-        if breaking and loop_stack and node is loop_stack[-1]:
-            loop_stack.pop()
-            breaking = False
-            continue
-
-        task = node.submit(context)
-
-        if task.target is not None:
-            result = task.target(*task.args, **task.kwargs)
-            node.write(context, result)
-
-        if task.control == _FC.ENTER:
-            exec_stack.append(node)
-            trace_stack.append(trace)
-            loop_stack.append(node)
-        elif task.control == _FC.EXIT:
-            breaking = True
-
-        if task.recruit is None:
-            continue
-
-        for next_node in task.recruit:
-            next_id = id(next_node)
-            if next_id in trace:
-                raise _err.CircularRecruitmentError(node, next_node)
-
-            exec_stack.append(next_node)
-            trace_stack.append(trace | {next_id})
-
-    return context
 
 
 class Graph(_ob.NameMixin, _ob.UIDMixin):
@@ -171,7 +118,12 @@ class Graph(_ob.NameMixin, _ob.UIDMixin):
                 f"got {type(exposes).__name__!r}."
             )
 
-    def lambdify(self, *, scheduler: Scheduler | None = None):
+    def lambdify(
+        self,
+        *,
+        scheduler: Scheduler | None = None,
+        executor: Executor | None = None
+    ):
         """Transform the graph to a lambda function.
 
         Args:
@@ -183,6 +135,11 @@ class Graph(_ob.NameMixin, _ob.UIDMixin):
         Returns:
             Callable: The lambda function.
         """
+        if scheduler is None:
+            raise NotImplementedError # TODO: use the global
+        if executor is None:
+            raise NotImplementedError
+
         def runner(*args, **kwargs):
             context = Context()
             if args or kwargs:
@@ -191,10 +148,7 @@ class Graph(_ob.NameMixin, _ob.UIDMixin):
                 initial.update(kwargs)
                 context.write(self.uid, initial)
 
-            if scheduler is None:
-                raise NotImplementedError # TODO: use the global
-
-            context = scheduler.forward(context, self._starters)
+            context = scheduler.forward(context, self._starters, executor=executor)
             return self._construct_output(context)
 
         return runner
@@ -205,10 +159,25 @@ class Graph(_ob.NameMixin, _ob.UIDMixin):
 
 
 class GraphThread(Thread):
-    def __init__(self, listeners: list[Node], event_queue: Queue):
+    def __init__(
+        self,
+        listeners: list[Node],
+        event_queue: Queue,
+        *,
+        scheduler: Scheduler | None = None,
+        executor: Executor | None = None
+    ):
         super().__init__()
         self.listeners = listeners
         self.event_queue = event_queue
+
+        if scheduler is None:
+                raise NotImplementedError # TODO: use the global
+        if executor is None:
+            raise NotImplementedError
+
+        self._sch = scheduler
+        self._exe = executor
 
     def run(self) -> None:
         while True:
@@ -225,7 +194,7 @@ class GraphThread(Thread):
         starters = self._get_starters_for_event(event)
 
         if starters:
-            execute({}, starters)
+            context = self._sch.forward(Context(), starters, executor=self._exe)
 
     def _get_starters_for_event(self, event: Any) -> list[Node]:
         """Filter listeners for an event."""

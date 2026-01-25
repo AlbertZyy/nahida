@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-__all__ = ["Scheduler"]
+__all__ = ["Scheduler", "ConcurrentScheduler"]
 
 from typing import Sequence
 from dataclasses import dataclass
@@ -65,23 +65,27 @@ class ScopeManager:
 
 
 class Scheduler:
-    def __init__(self, *, executor: Executor, max_inflight: int = 1000) -> None:
-        """
-        Args:
-            executor (Executor): the executor.
-            max_inflight (int): maximum number of tasks to be executed in parallel.
-        """
-        self.executor = executor
-        self.max_inflight = max_inflight
-
-    def forward(self, context: Context, starters: Sequence[Node]) -> Context:
+    def forward(self, context: Context, starters: Sequence[Node], *, executor: Executor) -> Context:
         """Forward computation of a node graph.
 
         Args:
-            context (dict[int, Any]): The context where the nodes read their
+            context (Context): The context where the nodes read their
                 inputs and write their outputs.
             starters (Sequence of Node): The starting nodes.
+            executor (Executor): An executor that supports submit and wait.
         """
+        raise NotImplementedError()
+
+
+class ConcurrentScheduler(Scheduler):
+    def __init__(self, max_inflight: int = 1000) -> None:
+        """
+        Args:
+            max_inflight (int): maximum number of tasks to be executed in parallel.
+        """
+        self.max_inflight = max_inflight
+
+    def forward(self, context: Context, starters: Sequence[Node], *, executor: Executor) -> Context:
         from itertools import chain
         # TODO: add checking for circular dependencies!
         scope_manager = ScopeManager(len(starters))
@@ -107,7 +111,7 @@ class Scheduler:
                 for expr in chain(task_item.args, task_item.kwargs.values()):
                     uid_set |= expr.refs()
 
-                wid = self.executor.submit(
+                wid = executor.submit(
                     task_item.source, context.view(uid_set),
                     *task_item.args, **task_item.kwargs
                 )
@@ -118,7 +122,7 @@ class Scheduler:
                     break
                 continue
 
-            event = self.executor.wait()
+            event = executor.wait()
 
             if event.work_id is None: # executor-level events
                 if event.is_shutdown():
@@ -131,7 +135,7 @@ class Scheduler:
                     self._recruit_downstreams_and_recall_if_scope_done(
                         ready_nodes, scope_manager, task_item, node, scope_id
                     )
-                elif event.is_failed() or event.is_cancelled():
+                else:
                     scope_manager.on_node_complete(scope_id)
                     self._recall_if_scope_done(ready_nodes, scope_manager, scope_id)
 

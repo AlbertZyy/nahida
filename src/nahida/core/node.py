@@ -15,7 +15,7 @@ __all__ = [
 ]
 
 from typing import Any, overload, Literal
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from enum import StrEnum
 
@@ -177,6 +177,14 @@ class _ContextReader:
         subscriptions."""
         return iter(self._kwargs)
 
+    def deps(self) -> set[int]:
+        """Return the UIDs of nodes that the attributes depends on."""
+        from itertools import chain
+        uid_set: set[int] = set()
+        for expr in chain(self._args, self._kwargs.values()):
+            uid_set |= expr.refs()
+        return uid_set
+
     def read_context(self, context: _ctx.Context, attr: int | str, /) -> tuple[Any, bool]:
         """Try fetching a value for an attribute on the given context."""
         if isinstance(attr, str) and attr in self._kwargs:
@@ -187,7 +195,7 @@ class _ContextReader:
             return None, False
 
         try:
-            return expr.eval(context.view(expr.refs())), True
+            return expr.eval(context), True
         except Exception as e:
             raise _err.SubscribeError(self, attr) from e
 
@@ -288,12 +296,13 @@ class Execute(_Recruiter, _ContextReader, Node):
 
 class Branch(_ContextReader, Node):
     """Branch the execution based on a condition."""
-    def __init__(self, condition: Expr | bool = False, /, *, uid: int | None = None) -> None:
+    def __init__(self, condition: Expr | bool | None = None, /, *, uid: int | None = None) -> None:
         Node.__init__(self, uid=uid)
         _ContextReader.__init__(self)
         self._downstreams_true = _Recruiter()
         self._downstreams_false = _Recruiter()
-        self.subs(condition)
+        if condition is not None:
+            self.subs(condition)
 
     @property
     def true(self):
@@ -322,7 +331,8 @@ class Repeat(_ContextReader, Node):
         self._downstreams_iter = _Recruiter()
         self._downstreams_stop = _Recruiter()
         self._iterator = None
-        self.subs(iterable)
+        if iterable is not None:
+            self.subs(iterable)
 
     @property
     def iter(self):

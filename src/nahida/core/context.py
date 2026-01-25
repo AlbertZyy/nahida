@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+__all__ = ["DataRef", "Context"]
+
 from typing import Any
 
 
@@ -26,7 +28,16 @@ class Context:
         self._data = {}
         self._ref_type = data_ref_type
 
-    def view(self, uids: set[int]) -> Context:
+    def __getitem__(self, key: Any, /) -> DataRef:
+        return self._data[key]
+
+    def __iter__(self):
+        return iter(self._data)
+
+    def __len__(self) -> int:
+        return len(self._data)
+
+    def view(self, uids: set[int], /) -> Context:
         ctx = Context(self._ref_type)
         for index in uids:
             try:

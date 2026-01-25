@@ -1,17 +1,24 @@
 
-__all__ = ["lambdify_like"]
+__all__ = ["expression", "nodal"]
 
+from typing import Any
 from collections.abc import Callable
 
-from .core.graph import Graph, ForwardFunc
+
+def expression(func: Callable[..., Any], /):
+    """A decorator that transforms a function into an expression operator."""
+    from functools import partial
+    from .core.executor import Executor
+    from .core.expr import FunctionExpr
+
+    fid = Executor.register(func)
+    return partial(FunctionExpr, fid)
 
 
-def lambdify_like(graph: Graph, *, forward: ForwardFunc | None = None):
-    def decorator[**P, R](stub: Callable[P, R], /):
-        def wrapper(*args: P.args, **kwargs: P.kwargs) -> R:
-            return graph.run(args, kwargs, forward=forward)
+def nodal(func: Callable[..., Any], /):
+    """A decorator that transform a function into an execution node."""
+    from .core.executor import Executor
+    from .core.node import Execute
 
-        wrapper.__stub__ = stub
-        return wrapper
-
-    return decorator
+    fid = Executor.register(func)
+    return Execute(fid, uid=fid)
