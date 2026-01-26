@@ -3,10 +3,11 @@ from __future__ import annotations
 __all__ = [] # NOTE: not allowed to be imported by *
 
 from typing import Any, TypeGuard
-from collections.abc import Callable, Mapping
+from collections.abc import Callable
 
-from . import _objbase
 from . import errors as _err
+from ._objbase import UIDMixin
+from .context import Context
 
 
 def _to_expr(obj: Any, /) -> Expr:
@@ -15,13 +16,13 @@ def _to_expr(obj: Any, /) -> Expr:
     return ConstExpr(obj)
 
 
-class Expr(_objbase.UIDMixin):
+class Expr(UIDMixin):
     """Base class for expressions
 
     Expressions are designed for lightweight data transformations between nodes.
     They are evaluated in a stack-like manner.
     """
-    def eval(self, context: Mapping[int, Any], /) -> Any:
+    def eval(self, context: Context, /) -> Any:
         """Evaluate the expression on the given context."""
         raise NotImplementedError()
 
@@ -29,10 +30,10 @@ class Expr(_objbase.UIDMixin):
         """Return the UIDs of all RefExprs that this expression depends on."""
         return set()
 
-    def __call__(self, context: Mapping[int, Any], /) -> Any:
+    def __call__(self, context: Context, /) -> Any:
         return self.eval(context)
 
-    def __getitem__(self, index: int | str) -> GetItemExpr:
+    def __getitem__(self, index: int | str, /) -> GetItemExpr:
         return GetItemExpr(self, index)
 
     def __or__(self, other: Any, /) -> UnionExpr:
@@ -47,16 +48,39 @@ def is_expr(obj: Any, /) -> TypeGuard[Expr]:
     return isinstance(obj, Expr)
 
 
-class simple_fetcher(Expr):
-    def __init__(self, index: int) -> None:
+class VariableExpr(Expr):
+    def __init__(self, target_uid: int, /) -> None:
         super().__init__()
-        self._obj = index
+        self._target_uid = target_uid
 
-    def eval(self, context: Mapping[int, Any], /) -> Any:
+    def __getitem__(self, index: int | str, /) -> VariablGetItemExpr:
+        return VariablGetItemExpr(self._target_uid, index)
+
+    def eval(self, context: Context, /) -> Any:
         try:
-            return context[self._obj]
+            return context[self._target_uid].get()
         except KeyError as e:
-            raise _err.DataNotFoundError(self._obj) from e
+            raise _err.DataNotFoundError(self._target_uid) from e
+
+    def refs(self) -> set[int]:
+        return {self._target_uid}
+
+
+class VariablGetItemExpr(Expr):
+    def __init__(self, target_uid: int, index: Any, /) -> None:
+        super().__init__()
+        self._target_uid = target_uid
+        self._index = _to_expr(index)
+
+    def eval(self, context: Context, /) -> Any:
+        try:
+            index = self._index.eval(context)
+            return context[self._target_uid].get(index)
+        except KeyError as e:
+            raise _err.DataNotFoundError(self._target_uid) from e
+
+    def refs(self) -> set[int]:
+        return {self._target_uid} | self._index.refs()
 
 
 class ConstExpr[T](Expr):
@@ -65,7 +89,7 @@ class ConstExpr[T](Expr):
         super().__init__()
         self._value = value
 
-    def eval(self, context: Mapping[int, Any], /) -> T:
+    def eval(self, context: Context, /) -> T:
         return self._value
 
 
@@ -75,11 +99,14 @@ class RefExpr(Expr):
     Raises *DataNotFoundError* if the UID of this expression does not exist in
     the context.
     """
-    def eval(self, context: Mapping[int, Any], /) -> Any:
+    def __getitem__(self, index: int | str, /) -> VariablGetItemExpr:
+        return VariablGetItemExpr(self.uid, index)
+
+    def eval(self, context: Context, /) -> Any:
         try:
-            return context[self.uid]
+            return context[self.uid].get()
         except KeyError as e:
-            raise _err.DataNotFoundError(self) from e
+            raise _err.DataNotFoundError(self.uid) from e
 
     def refs(self) -> set[int]:
         return {self.uid}
@@ -96,7 +123,7 @@ class GetItemExpr(Expr):
         self._expr = expr
         self._index = _to_expr(index)
 
-    def eval(self, context: Mapping[int, Any], /) -> Any:
+    def eval(self, context: Context, /) -> Any:
         val = self._expr.eval(context)
         index = self._index.eval(context)
 
@@ -127,7 +154,7 @@ class UnionExpr(Expr):
             else:
                 self._exprs.append(expr)
 
-    def eval(self, context: Mapping[int, Any], /) -> Any:
+    def eval(self, context: Context, /) -> Any:
         for expr in self._exprs:
             try:
                 return expr.eval(context)
@@ -170,7 +197,7 @@ class FormulaExpr(Expr):
         )
         self._locals = locals
 
-    def eval(self, context: Mapping[int, Any], /) -> Any:
+    def eval(self, context: Context, /) -> Any:
         local_vars = {name: value.eval(context) for name, value in self._locals.items()}
         try:
             return self._func(**local_vars)
@@ -191,17 +218,18 @@ class FunctionExpr(Expr):
 
     Raises *ExprEvalError* when the evaluation failed.
     """
-    def __init__(self, func: Callable[..., Any], /, *args: Expr, **kwargs: Expr) -> None:
-        super().__init__()
-        self._func = func
+    def __init__(self, fid: int, /, *args: Expr, **kwargs: Expr) -> None:
+        self._fid = fid
         self._args = args
         self._kwargs = kwargs
 
-    def eval(self, context: Mapping[int, Any], /) -> Any:
+    def eval(self, context: Context, /) -> Any:
         local_args = [arg.eval(context) for arg in self._args]
         local_kwargs = {name: value.eval(context) for name, value in self._kwargs.items()}
         try:
-            return self._func(*local_args, **local_kwargs)
+            from .executor import Executor
+            fn = Executor._callable_registry[self._fid]
+            return fn(*local_args, **local_kwargs)
         except Exception as e:
             raise _err.ExprEvalError() from e
 
@@ -215,9 +243,3 @@ class FunctionExpr(Expr):
             result |= kwarg.refs()
 
         return result
-
-
-def expression(func: Callable[..., Any], /):
-    """A decorator that transforms a function into an expression operator."""
-    from functools import partial
-    return partial(FunctionExpr, func)

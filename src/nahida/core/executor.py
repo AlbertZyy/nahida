@@ -1,6 +1,5 @@
 
 __all__ = [
-    "WorkID",
     "ErrorInfo",
     "WorkEvent",
     "Executor",
@@ -15,15 +14,19 @@ import traceback
 from queue import SimpleQueue
 import uuid
 
+from .context import Context, DataRef
+from .expr import Expr
+
 
 WorkID = NewType("WorkID", str)
 
 @dataclass(slots=True, frozen=True)
 class _WorkItem:
     uid: WorkID
-    fn: Callable[..., Any]
-    args: tuple[Any, ...] = field(default_factory=tuple)
-    kwargs: dict[str, Any] = field(default_factory=dict)
+    source: int | str
+    context: Context
+    args: tuple[Expr, ...] = field(default_factory=tuple)
+    kwargs: dict[str, Expr] = field(default_factory=dict)
     error_traceback: bool = False
 
 
@@ -48,7 +51,7 @@ class ErrorInfo:
 class WorkEvent:
     work_id: WorkID | None
     status: WorkStatus
-    value: Any | None = None
+    value: DataRef | None = None
     error_info: ErrorInfo | None = None
 
     def is_success(self) -> bool:
@@ -65,18 +68,57 @@ class WorkEvent:
 
 
 class Executor:
-    def submit[**P](
+    _callable_registry: dict[int, Callable[..., Any]] = {}
+
+    @classmethod
+    def register(cls, target: Callable[..., Any], *, fid: int | None = None) -> int:
+        if fid is None:
+            if hasattr(target, "__name__"):
+                fid = hash(target.__name__)
+                while fid in cls._callable_registry:
+                    fid += 1
+            else:
+                raise ValueError()
+
+        elif fid in cls._callable_registry:
+            raise KeyError(f"id {fid} already exist")
+
+        cls._callable_registry[fid] = target
+
+        return fid
+
+    def submit(
         self,
-        fn: Callable[P, Any],
+        source: int | str,
+        context: Context,
         /,
-        *args: P.args,
-        **kwargs: P.kwargs
+        *args: Expr,
+        **kwargs: Expr
     ) -> WorkID:
-        """Submits a callable to be executed with the given arguments."""
+        """Submits a task to be executed with the given arguments.
+
+        Args:
+            source (int | str): Unique ID of callable registered or source code.
+            context (Context): Necessary memories for expressions to evaluate.
+            *args (Expr): Expressions for positional arguments.
+            **kwargs (Expr): Expressions for keyword arguments.
+
+        Returns:
+            int: UID of the created work.
+        """
         raise NotImplementedError
 
     def wait(self) -> WorkEvent:
-        """Wait for the next work event."""
+        """Wait for the next work event.
+
+        Returns:
+            WorkEvent: an dataclass containing
+            - work_id (int | None): The work ID returned by `submit`.
+            - status (WorkStatus): success, failed, cancelled or shutdown.
+            - value (DataRef | None): Data reference of the returned result.
+                Ready for being put back into a context, or directly get the value.
+            - error_info (ErrorInfo | None): Error information.
+        """
         raise NotImplementedError
 
     def cancel(self, work_id: WorkID, /) -> bool:
@@ -90,6 +132,11 @@ class Executor:
 
 class ThreadPoolExecutor(Executor):
     def __init__(self, max_workers: int | None = None) -> None:
+        """A thread pool executor.
+
+        Args:
+            max_workers (int | None, optional): Max number of workers.
+        """
         from concurrent.futures import ThreadPoolExecutor as _TPE, Future
         self._event_queue: SimpleQueue[WorkEvent] = SimpleQueue()
         self._executor = _TPE(max_workers)
@@ -97,12 +144,25 @@ class ThreadPoolExecutor(Executor):
 
     @staticmethod
     def _worker(event_queue: SimpleQueue, work_item: _WorkItem) -> None:
+        fid = work_item.source
+        context = work_item.context
         try:
-            result = work_item.fn(*work_item.args, **work_item.kwargs)
+            if isinstance(fid, int):
+                fn = Executor._callable_registry[fid]
+                args = [expr.eval(context) for expr in work_item.args]
+                kwargs = {key: expr.eval(context) for key, expr in work_item.kwargs.items()}
+                result = fn(*args, **kwargs)
+            elif isinstance(fid, str):
+                fn = lambda kwargs: exec(fid, kwargs)
+                kwargs = {key: expr.eval(context) for key, expr in work_item.kwargs.items()}
+                result = fn(**kwargs)
+            else:
+                raise TypeError(f"invalid type of work item source: {type(fid).__name__}")
+
             event = WorkEvent(
                 work_id=work_item.uid,
                 status=WorkStatus.SUCCESS,
-                value=result
+                value=DataRef(result)
             )
         except Exception as e:
             event = WorkEvent(
@@ -116,15 +176,16 @@ class ThreadPoolExecutor(Executor):
             )
         event_queue.put(event)
 
-    def submit[**P](
+    def submit(
         self,
-        fn: Callable[P, Any],
+        source: int | str,
+        context: Context,
         /,
-        *args: P.args,
-        **kwargs: P.kwargs
+        *args: Expr,
+        **kwargs: Expr
     ) -> WorkID:
         work_id = WorkID(str(uuid.uuid4()))
-        work_item = _WorkItem(work_id, fn, args, kwargs) # TODO: error traceback field
+        work_item = _WorkItem(work_id, source, context, args, kwargs) # TODO: error traceback field
         fut = self._executor.submit(
             self._worker, self._event_queue, work_item
         )
@@ -141,7 +202,10 @@ class ThreadPoolExecutor(Executor):
         return event
 
     def cancel(self, work_id: WorkID, /) -> bool:
-        fut = self._futures.pop(work_id)
+        try:
+            fut = self._futures.pop(work_id)
+        except KeyError:
+            return False
 
         if fut.cancel():
             self._event_queue.put(WorkEvent(work_id, WorkStatus.CANCELLED))

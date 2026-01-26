@@ -1,11 +1,15 @@
 from __future__ import annotations
 
-__all__ = ["Scheduler"]
+__all__ = [
+    "Scheduler",
+    "ConcurrentScheduler"
+]
 
-from typing import Any, Sequence
+from typing import Sequence
 from dataclasses import dataclass
 from collections import deque
 
+from .context import Context
 from .node import FlowCtrl, Node, TaskItem
 from .executor import WorkID, Executor
 
@@ -64,23 +68,28 @@ class ScopeManager:
 
 
 class Scheduler:
-    def __init__(self, *, executor: Executor, max_inflight: int = 1000) -> None:
-        """
-        Args:
-            executor (Executor): the executor.
-            max_inflight (int): maximum number of tasks to be executed in parallel.
-        """
-        self.executor = executor
-        self.max_inflight = max_inflight
-
-    def forward(self, context: dict[int, Any], starters: Sequence[Node]) -> dict[int, Any]:
+    def forward(self, context: Context, starters: Sequence[Node], *, executor: Executor) -> Context:
         """Forward computation of a node graph.
 
         Args:
-            context (dict[int, Any]): The context where the nodes read their
+            context (Context): The context where the nodes read their
                 inputs and write their outputs.
             starters (Sequence of Node): The starting nodes.
+            executor (Executor): An executor that supports submit and wait.
         """
+        raise NotImplementedError()
+
+
+class ConcurrentScheduler(Scheduler):
+    def __init__(self, max_inflight: int = 1000) -> None:
+        """
+        Args:
+            max_inflight (int): maximum number of tasks to be executed in parallel.
+        """
+        self.max_inflight = max_inflight
+
+    def forward(self, context: Context, starters: Sequence[Node], *, executor: Executor) -> Context:
+        from itertools import chain
         # TODO: add checking for circular dependencies!
         scope_manager = ScopeManager(len(starters))
         ready_nodes: deque[tuple[Node, int]] = deque()
@@ -95,13 +104,20 @@ class Scheduler:
                 node, scope_id = ready_nodes.popleft()
                 task_item = node.submit(context)
 
-                if task_item.target is None:
+                if task_item.source is None:
                     self._recruit_downstreams_and_recall_if_scope_done(
                         ready_nodes, scope_manager, task_item, node, scope_id
                     )
                     continue
 
-                wid = self.executor.submit(task_item.target, *task_item.args, **task_item.kwargs)
+                uid_set: set[int] = set()
+                for expr in chain(task_item.args, task_item.kwargs.values()):
+                    uid_set |= expr.refs()
+
+                wid = executor.submit(
+                    task_item.source, context.view(uid_set),
+                    *task_item.args, **task_item.kwargs
+                )
                 inflight[wid] = (node, scope_id, task_item)
 
             if len(inflight) == 0:
@@ -109,20 +125,20 @@ class Scheduler:
                     break
                 continue
 
-            event = self.executor.wait()
+            event = executor.wait()
 
             if event.work_id is None: # executor-level events
                 if event.is_shutdown():
                     break
             else:
                 node, scope_id, task_item = inflight.pop(event.work_id)
-
                 if event.is_success():
-                    node.write(context, event.value)
+                    if event.value is not None:
+                        context[node.uid] = event.value
                     self._recruit_downstreams_and_recall_if_scope_done(
                         ready_nodes, scope_manager, task_item, node, scope_id
                     )
-                elif event.is_failed() or event.is_cancelled():
+                else:
                     scope_manager.on_node_complete(scope_id)
                     self._recall_if_scope_done(ready_nodes, scope_manager, scope_id)
 

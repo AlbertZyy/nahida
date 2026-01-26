@@ -1,7 +1,6 @@
 # nahida/core/graph.py
 
 __all__ = [
-    "execute",
     "Graph",
     "GraphThread"
 ]
@@ -9,76 +8,25 @@ __all__ = [
 from threading import Thread
 from queue import Queue
 from typing import Any
-from collections.abc import Sequence, Callable, Mapping
+from collections.abc import Sequence, Callable
 
 from . import _objbase as _ob
 from . import expr as _expr
 from . import errors as _err
-from .node import Node, FlowCtrl as _FC
+from . import node as _node
+from .context import Context, DataRef
+# from .node import Node
+from .scheduler import Scheduler
+from .executor import Executor
 
 Expr = _expr.Expr
-
-type ForwardFunc = Callable[[dict[int, Any], Sequence[Node]], dict[int, Any]]
-
-
-def execute(
-    context: dict[int, Any], starters: Sequence[Node]
-) -> dict[int, Any]:
-    """Execute nodes with given inputs.
-
-    Args:
-        context (dict[int, Any]): Running context.
-        starters (Sequence of Node): The starting nodes to execute.
-
-    Returns:
-        dict: The remaining context, mapping from PortId to their values.
-    """
-    exec_stack: list[Node] = list(starters)
-    loop_stack: list[Node] = []
-    trace_stack: list[set[int]] = [{id(node)} for node in exec_stack]
-    breaking = False
-
-    while exec_stack:
-        node = exec_stack.pop()
-        trace = trace_stack.pop()
-
-        if breaking and loop_stack and node is loop_stack[-1]:
-            loop_stack.pop()
-            breaking = False
-            continue
-
-        task = node.submit(context)
-
-        if task.target is not None:
-            result = task.target(*task.args, **task.kwargs)
-            node.write(context, result)
-
-        if task.control == _FC.ENTER:
-            exec_stack.append(node)
-            trace_stack.append(trace)
-            loop_stack.append(node)
-        elif task.control == _FC.EXIT:
-            breaking = True
-
-        if task.recruit is None:
-            continue
-
-        for next_node in task.recruit:
-            next_id = id(next_node)
-            if next_id in trace:
-                raise _err.CircularRecruitmentError(node, next_node)
-
-            exec_stack.append(next_node)
-            trace_stack.append(trace | {next_id})
-
-    return context
 
 
 class Graph(_ob.NameMixin, _ob.UIDMixin):
     """General computational node graph."""
     def __init__(
         self,
-        starters: Sequence[Node],
+        starters: Sequence[_node.Node],
         exposes: Expr | tuple[Expr, ...] | dict[str, Expr] | None = None,
         *,
         uid: int | None = None
@@ -119,7 +67,7 @@ class Graph(_ob.NameMixin, _ob.UIDMixin):
                 f"expected expressions, got {type(port).__name__!r}."
             )
 
-    def _read_context(self, context: Mapping[int, Any], expr: Expr, expose_item: Any = None):
+    def _read_context(self, context: Context, expr: Expr, expose_item: Any = None):
         try:
             val = expr.eval(context)
         except Exception as e:
@@ -130,7 +78,7 @@ class Graph(_ob.NameMixin, _ob.UIDMixin):
     def _build_exposer(
         self,
         exposes: Expr | tuple[Expr, ...] | dict[str, Expr] | None
-    ) -> Callable[[Mapping[int, Any]], Any]:
+    ) -> Callable[[Context], Any]:
         if exposes is None:
             def _output_constructor(context): # type: ignore
                 return None
@@ -169,62 +117,71 @@ class Graph(_ob.NameMixin, _ob.UIDMixin):
                 f"got {type(exposes).__name__!r}."
             )
 
-    def lambdify(self, *, forward: ForwardFunc | None = None):
+    def lambdify(
+        self,
+        *,
+        data_refer: type[DataRef] = DataRef,
+        scheduler: Scheduler | None = None,
+        executor: Executor | None = None
+    ):
         """Transform the graph to a lambda function.
 
         Args:
-            forward (Callable): The forward method of a scheduler to be injected.
-                It should receives a context and a sequence of starters, and
-                returns the result context (inplace operations allowed).
-                Defaults to `None`, using the global default scheduler.
+            data_refer (type[DataRef]): The data reference class.
+                Defaults to `DataRef`.
+            scheduler (Scheduler, optional): The scheduler defining the
+                execution flow.
+                Defaults to `None`, using the global default.
+            executor (Executor, optional): The executor running the works
+                submitted by the scheduler.
+                Defaults to `None`, using the global default.
 
         Returns:
             Callable: The lambda function.
         """
+        if scheduler is None:
+            raise NotImplementedError # TODO: use the global
+        if executor is None:
+            raise NotImplementedError
+
         def runner(*args, **kwargs):
+            context = Context()
             if args or kwargs:
                 initial: dict[int | str, Any] = {}
                 initial.update(enumerate(args))
                 initial.update(kwargs)
-                context = {self.uid: initial}
-            else:
-                context = {}
+                context[self.uid] = data_refer(initial)
 
-            _forward = forward or execute
-            context = _forward(context, self._starters)
+            context = scheduler.forward(context, self._starters, executor=executor)
             return self._construct_output(context)
 
         return runner
 
     @property
-    def input(self) -> Expr:
-        return _expr.simple_fetcher(self.uid)
-
-    def run(
-        self,
-        args: tuple[Any, ...] = (),
-        kwargs: dict[str, Any] = {},
-        *,
-        forward: ForwardFunc | None = None
-    ):
-        if args or kwargs:
-            initial: dict[int | str, Any] = {}
-            initial.update(enumerate(args))
-            initial.update(kwargs)
-            context = {self.uid: initial}
-        else:
-            context = {}
-
-        _forward = forward or execute
-        context = _forward(context, self._starters)
-        return self._construct_output(context)
+    def input(self):
+        return _expr.VariableExpr(self.uid)
 
 
 class GraphThread(Thread):
-    def __init__(self, listeners: list[Node], event_queue: Queue):
+    def __init__(
+        self,
+        listeners: list[_node.Node],
+        event_queue: Queue,
+        *,
+        scheduler: Scheduler | None = None,
+        executor: Executor | None = None
+    ):
         super().__init__()
         self.listeners = listeners
         self.event_queue = event_queue
+
+        if scheduler is None:
+                raise NotImplementedError # TODO: use the global
+        if executor is None:
+            raise NotImplementedError
+
+        self._sch = scheduler
+        self._exe = executor
 
     def run(self) -> None:
         while True:
@@ -241,9 +198,9 @@ class GraphThread(Thread):
         starters = self._get_starters_for_event(event)
 
         if starters:
-            execute({}, starters)
+            context = self._sch.forward(Context(), starters, executor=self._exe)
 
-    def _get_starters_for_event(self, event: Any) -> list[Node]:
+    def _get_starters_for_event(self, event: Any) -> list[_node.Node]:
         """Filter listeners for an event."""
         # TODO: Implement
         return self.listeners
