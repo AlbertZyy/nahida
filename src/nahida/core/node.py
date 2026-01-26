@@ -10,8 +10,7 @@ __all__ = [
     "Branch",
     "Repeat",
     "Break",
-    "Join",
-    # "Group"
+    "Join"
 ]
 
 from typing import Any, overload, Literal
@@ -51,6 +50,7 @@ class TaskItem:
     source: int | str | None = None
     args: tuple[Expr, ...] = field(default_factory=tuple)
     kwargs: dict[str, Expr] = field(default_factory=dict)
+    output: Any = empty
     recruit: set[Node] | None = None
     control: FlowCtrl = FlowCtrl.NONE
 
@@ -408,25 +408,3 @@ class Join(_Recruiter, Node):
         def submit(self, context: _ctx.Context):
             self.parent.flags[self.index] = True
             return TaskItem(recruit={self.parent,})
-
-
-# class Group(_Recruiter, _ContextReader, Node):
-#     """Node group that runs an internal graph."""
-#     def __init__(self, graph, values: dict[str, Any], *, uid: Any = None):
-#         Node.__init__(self, uid=uid)
-#         _ContextReader.__init__(self, **values)
-#         _Recruiter.__init__(self)
-#         from .graph import Graph
-#         assert isinstance(graph, Graph), "invalid graph"
-#         self._graph = graph
-#         self._func = graph.lambdify()
-
-#     def submit(self, context: dict[int, Any]) -> TaskItem:
-#         args, kwargs = self.read_context_all_subscriptions(context)
-
-#         return TaskItem(
-#             target=self._func,
-#             args=args,
-#             kwargs=kwargs,
-#             recruit=self.downstream_nodes()
-#         )

@@ -13,21 +13,20 @@ from collections.abc import Sequence, Callable
 from . import _objbase as _ob
 from . import expr as _expr
 from . import errors as _err
+from . import node as _node
 from .context import Context, DataRef
-from .node import Node
+# from .node import Node
 from .scheduler import Scheduler
 from .executor import Executor
 
 Expr = _expr.Expr
-
-type ForwardFunc = Callable[[Context, Sequence[Node]], Context]
 
 
 class Graph(_ob.NameMixin, _ob.UIDMixin):
     """General computational node graph."""
     def __init__(
         self,
-        starters: Sequence[Node],
+        starters: Sequence[_node.Node],
         exposes: Expr | tuple[Expr, ...] | dict[str, Expr] | None = None,
         *,
         uid: int | None = None
@@ -128,10 +127,14 @@ class Graph(_ob.NameMixin, _ob.UIDMixin):
         """Transform the graph to a lambda function.
 
         Args:
-            scheduler (Scheduler): The forward method of a scheduler should
-                receives a context and a sequence of starters, and
-                returns the result context (inplace operations allowed).
-                Defaults to `None`, using the global default scheduler.
+            data_refer (type[DataRef]): The data reference class.
+                Defaults to `DataRef`.
+            scheduler (Scheduler, optional): The scheduler defining the
+                execution flow.
+                Defaults to `None`, using the global default.
+            executor (Executor, optional): The executor running the works
+                submitted by the scheduler.
+                Defaults to `None`, using the global default.
 
         Returns:
             Callable: The lambda function.
@@ -162,7 +165,7 @@ class Graph(_ob.NameMixin, _ob.UIDMixin):
 class GraphThread(Thread):
     def __init__(
         self,
-        listeners: list[Node],
+        listeners: list[_node.Node],
         event_queue: Queue,
         *,
         scheduler: Scheduler | None = None,
@@ -197,7 +200,7 @@ class GraphThread(Thread):
         if starters:
             context = self._sch.forward(Context(), starters, executor=self._exe)
 
-    def _get_starters_for_event(self, event: Any) -> list[Node]:
+    def _get_starters_for_event(self, event: Any) -> list[_node.Node]:
         """Filter listeners for an event."""
         # TODO: Implement
         return self.listeners
