@@ -1,17 +1,53 @@
 from __future__ import annotations
 
 __all__ = [
+    "FlowControl",
+    "OrderItem",
     "Scheduler",
     "ConcurrentScheduler"
 ]
 
-from typing import Sequence
-from dataclasses import dataclass
+from typing import Sequence, Protocol, Any
+from dataclasses import dataclass, field
 from collections import deque
+from collections.abc import Collection
+from enum import StrEnum
 
-from .context import Context
-from .node import FlowCtrl, Node, TaskItem
-from .executor import WorkID, Executor
+from .context import Context, SimpleDataRef, DataRefFactory
+from .expr import Expr
+from .executor import TaskID, Executor
+
+
+class FlowControl(StrEnum):
+    """Workflow control instruction after execution."""
+
+    NONE = "none"
+    """Do nothing and be removed from the tasks."""
+
+    ENTER = "enter"
+    """Require a new scope for downstreams."""
+
+    EXIT = "exit"
+    """Require cancel the current scope."""
+
+
+empty = object()
+
+@dataclass(slots=True, frozen=True)
+class OrderItem:
+    source: int | str | None = None
+    args: tuple[Expr, ...] = field(default_factory=tuple)
+    kwargs: dict[str, Expr] = field(default_factory=dict)
+    release: Any = empty
+    recruit: Collection[Node] | None = None
+    control: FlowControl = FlowControl.NONE
+
+
+class Node(Protocol):
+    @property
+    def uid(self) -> int: ...
+    def order(self, context: Context, /) -> OrderItem: ...
+    def exit(self) -> None: ...
 
 
 @dataclass(slots=True)
@@ -81,12 +117,18 @@ class Scheduler:
 
 
 class ConcurrentScheduler(Scheduler):
-    def __init__(self, max_inflight: int = 1000) -> None:
-        """
+    def __init__(self, max_inflight: int = 1000, data_ref: DataRefFactory = SimpleDataRef) -> None:
+        """A concurrent scheduler.
+
         Args:
             max_inflight (int): maximum number of tasks to be executed in parallel.
+            data_ref (type): A callable returning a DataRef instance with no
+                parameters. DataRef refers to instances that have `get` and
+                `set` methods to load and save data.
+                Defaults to SimpleDataRef that stores values in memory directly.
         """
-        self.max_inflight = max_inflight
+        self._max_inflight = max_inflight
+        self._data_ref_factory = data_ref
 
     def forward(self, context: Context, starters: Sequence[Node], *, executor: Executor) -> Context:
         from itertools import chain
@@ -97,28 +139,31 @@ class ConcurrentScheduler(Scheduler):
         for n in starters:
             ready_nodes.append((n, 0))
 
-        inflight: dict[WorkID, tuple[Node, int, TaskItem]] = {}
+        inflight: dict[TaskID, tuple[Node, int, OrderItem]] = {}
 
         while True:
-            while ready_nodes and len(inflight) < self.max_inflight:
+            while ready_nodes and len(inflight) < self._max_inflight:
                 node, scope_id = ready_nodes.popleft()
-                task_item = node.submit(context)
+                order_item = node.order(context)
 
-                if task_item.source is None:
+                if order_item.release is not empty:
+                    context[node.uid] = self._data_ref_factory(order_item.release)
+
+                if order_item.source is None:
                     self._recruit_downstreams_and_recall_if_scope_done(
-                        ready_nodes, scope_manager, task_item, node, scope_id
+                        ready_nodes, scope_manager, order_item, node, scope_id
                     )
                     continue
 
                 uid_set: set[int] = set()
-                for expr in chain(task_item.args, task_item.kwargs.values()):
+                for expr in chain(order_item.args, order_item.kwargs.values()):
                     uid_set |= expr.refs()
 
                 wid = executor.submit(
-                    task_item.source, context.view(uid_set),
-                    *task_item.args, **task_item.kwargs
+                    order_item.source, context.view(uid_set),
+                    order_item.args, order_item.kwargs
                 )
-                inflight[wid] = (node, scope_id, task_item)
+                inflight[wid] = (node, scope_id, order_item)
 
             if len(inflight) == 0:
                 if len(ready_nodes) == 0:
@@ -127,16 +172,16 @@ class ConcurrentScheduler(Scheduler):
 
             event = executor.wait()
 
-            if event.work_id is None: # executor-level events
+            if event.task_id is None: # executor-level events
                 if event.is_shutdown():
                     break
             else:
-                node, scope_id, task_item = inflight.pop(event.work_id)
+                node, scope_id, order_item = inflight.pop(event.task_id)
                 if event.is_success():
                     if event.value is not None:
                         context[node.uid] = event.value
                     self._recruit_downstreams_and_recall_if_scope_done(
-                        ready_nodes, scope_manager, task_item, node, scope_id
+                        ready_nodes, scope_manager, order_item, node, scope_id
                     )
                 else:
                     scope_manager.on_node_complete(scope_id)
@@ -149,7 +194,7 @@ class ConcurrentScheduler(Scheduler):
         cls,
         ready_nodes: deque[tuple[Node, int]],
         scope_manager: ScopeManager,
-        task_item: TaskItem,
+        order_item: OrderItem,
         node: Node,
         scope_id: int
     ) -> None:
@@ -157,10 +202,10 @@ class ConcurrentScheduler(Scheduler):
         if scope_manager.check_scope_done(scope_id):
             return
 
-        if task_item.control == FlowCtrl.ENTER:
+        if order_item.control == FlowControl.ENTER:
             scope_id = scope_manager.create_scope(scope_id, node)
 
-        elif task_item.control == FlowCtrl.EXIT:
+        elif order_item.control == FlowControl.EXIT:
             scope_manager.cancel_scope(scope_id)
             recall_and_back_id = scope_manager.get_recall(scope_id)
 
@@ -168,15 +213,15 @@ class ConcurrentScheduler(Scheduler):
                 recall, scope_id = recall_and_back_id
                 recall.exit()
 
-        elif task_item.control == FlowCtrl.NONE:
+        elif order_item.control == FlowControl.NONE:
             scope_manager.on_node_complete(scope_id)
 
         else:
-            raise ValueError(f"Invalid control flow: {task_item.control!r}")
+            raise ValueError(f"Invalid control flow: {order_item.control!r}")
 
-        if task_item.recruit:
-            scope_manager.on_recruit(scope_id, len(task_item.recruit))
-            for nxt in task_item.recruit:
+        if order_item.recruit:
+            scope_manager.on_recruit(scope_id, len(order_item.recruit))
+            for nxt in order_item.recruit:
                 ready_nodes.append((nxt, scope_id))
 
         cls._recall_if_scope_done(ready_nodes, scope_manager, scope_id)

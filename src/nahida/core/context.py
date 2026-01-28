@@ -1,21 +1,33 @@
 from __future__ import annotations
 
-__all__ = ["DataRef", "Context"]
+__all__ = ["DataRef", "SimpleDataRef", "Context"]
 
-from typing import Any
+from typing import Any, Protocol
+from collections.abc import Callable
 
 
-class DataRef:
-    empty = object()
+empty = object()
+
+
+class DataRef(Protocol):
+    def get(self, item: Any = empty, /) -> Any:
+        """Get value from the data reference."""
+    def set(self, value: Any) -> None:
+        """Set value to the data reference."""
+
+type DataRefFactory = Callable[..., DataRef]
+
+
+class SimpleDataRef:
     _value: Any
 
     def __init__(self, value: Any = empty, /) -> None:
         self._value = value
 
     def get(self, item: Any = empty, /) -> Any:
-        if self._value is DataRef.empty:
+        if self._value is empty:
             raise ValueError()
-        if item is not DataRef.empty:
+        if item is not empty:
             return self._value[item]
         return self._value
 

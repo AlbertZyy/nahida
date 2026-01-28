@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 __all__ = [
-    "FlowCtrl",
-    "TaskItem",
+    "FlowControl",
+    "OrderItem",
     "Node",
     "Execute",
     "Branch",
@@ -15,44 +15,15 @@ __all__ = [
 
 from typing import Any, overload, Literal
 from collections.abc import Iterable
-from dataclasses import dataclass, field
-from enum import StrEnum
 
 from . import _objbase
 from . import context as _ctx
 from . import errors as _err
 from . import expr as _expr
+from .scheduler import FlowControl, OrderItem
 
 
 type Expr = _expr.Expr
-empty = object()
-
-
-class FlowCtrl(StrEnum):
-    """Workflow control instruction after execution."""
-
-    NONE = "none"
-    """Do nothing and be removed from the tasks."""
-
-    ENTER = "enter"
-    """Require a new scope for downstreams."""
-
-    EXIT = "exit"
-    """Require cancel the current scope."""
-
-
-@dataclass(slots=True, frozen=True)
-class TaskItem:
-    """Task item for a node.
-
-    See `Node.submit` for details.
-    """
-    source: int | str | None = None
-    args: tuple[Expr, ...] = field(default_factory=tuple)
-    kwargs: dict[str, Expr] = field(default_factory=dict)
-    output: Any = empty
-    recruit: set[Node] | None = None
-    control: FlowCtrl = FlowCtrl.NONE
 
 
 class Node(_objbase.NameMixin, _expr.RefExpr):
@@ -60,10 +31,10 @@ class Node(_objbase.NameMixin, _expr.RefExpr):
 
     Nodes are computational units that can be connected to other nodes, and
     are designed with the following interfaces:
-      - `submit`: submit execution/scheduling tasks to the controller,
+      - `order`: order execution/scheduling tasks to the controller,
       - `write`: put output values to the context,
 
-    where `submit` is abstract and must be implemented by subclasses, and
+    where `order` is abstract and must be implemented by subclasses, and
     `write` is defaults to putting values into the context dict directly.
     Here `context` is a dictionary of node IDs to the
     corresponding output values.
@@ -71,7 +42,7 @@ class Node(_objbase.NameMixin, _expr.RefExpr):
     def __init__(self, *, uid: int | None = None) -> None:
         _expr.Expr.__init__(self, uid=uid)
 
-    def submit(self, context: _ctx.Context) -> TaskItem:
+    def order(self, context: _ctx.Context) -> OrderItem:
         """Return a task to be submitted to the task queue.
 
         A task item is a dataclass containing the following fields:
@@ -88,7 +59,7 @@ class Node(_objbase.NameMixin, _expr.RefExpr):
             context (dict[int, Any]): The context of the environment.
 
         Returns:
-            TaskItem: The task item to be submitted to the task queue.
+            OrderItem: The task item to be submitted to the task queue.
         """
         raise NotImplementedError
 
@@ -276,8 +247,8 @@ class Execute(_Recruiter, _ContextReader, Node):
         _Recruiter.__init__(self)
         self._source = source
 
-    def submit(self, context: _ctx.Context):
-        return TaskItem(
+    def order(self, context: _ctx.Context):
+        return OrderItem(
             source=self._source,
             args=tuple(self._args),
             kwargs=self._kwargs,
@@ -305,13 +276,13 @@ class Branch(_ContextReader, Node):
         """Execute downstream nodes when condition is False."""
         return self._downstreams_false
 
-    def submit(self, context: _ctx.Context):
+    def order(self, context: _ctx.Context):
         val, status = self.read_context(context, 0)
 
         if bool(val) and status:
-            return TaskItem(recruit=self.true.downstream_nodes())
+            return OrderItem(recruit=self.true.downstream_nodes())
         else:
-            return TaskItem(recruit=self.false.downstream_nodes())
+            return OrderItem(recruit=self.false.downstream_nodes())
 
 
 class Repeat(_ContextReader, Node):
@@ -335,7 +306,7 @@ class Repeat(_ContextReader, Node):
         """Execute downstream nodes when the loop is stopped."""
         return self._downstreams_stop
 
-    def submit(self, context: _ctx.Context):
+    def order(self, context: _ctx.Context):
         if self._iterator is None:
             iterable = self.read_context(context, 0)[0]
             self._iterator = iter(iterable)
@@ -343,15 +314,15 @@ class Repeat(_ContextReader, Node):
             current = next(self._iterator)
         except StopIteration:
             self._iterator = None
-            return TaskItem(
+            return OrderItem(
                 recruit=self.stop.downstream_nodes(),
-                control=FlowCtrl.NONE
+                control=FlowControl.NONE
             )
-        context[self.uid] = _ctx.DataRef((current,))
 
-        return TaskItem(
+        return OrderItem(
+            release=(current,),
             recruit=self.iter.downstream_nodes(),
-            control=FlowCtrl.ENTER
+            control=FlowControl.ENTER
         )
 
     def exit(self) -> None:
@@ -380,8 +351,8 @@ class Repeat(_ContextReader, Node):
 
 class Break(_Recruiter, Node):
     """Break the repeat loop."""
-    def submit(self, context: _ctx.Context):
-        return TaskItem(recruit=self.downstream_nodes(), control=FlowCtrl.EXIT)
+    def order(self, context: _ctx.Context):
+        return OrderItem(recruit=self.downstream_nodes(), control=FlowControl.EXIT)
 
 
 class Join(_Recruiter, Node):
@@ -392,12 +363,12 @@ class Join(_Recruiter, Node):
         self.receivers = tuple(Join.Receiver(self, i) for i in range(num))
         self.flags = [False] * num
 
-    def submit(self, context: _ctx.Context) -> TaskItem:
+    def order(self, context: _ctx.Context) -> OrderItem:
         if all(self.flags):
             self.flags = [False] * len(self.receivers)
-            return TaskItem(recruit=self.downstream_nodes())
+            return OrderItem(recruit=self.downstream_nodes())
         else:
-            return TaskItem()
+            return OrderItem()
 
 
     class Receiver(Node):
@@ -405,6 +376,6 @@ class Join(_Recruiter, Node):
             self.parent = parent
             self.index = index
 
-        def submit(self, context: _ctx.Context):
+        def order(self, context: _ctx.Context):
             self.parent.flags[self.index] = True
-            return TaskItem(recruit={self.parent,})
+            return OrderItem(recruit={self.parent,})

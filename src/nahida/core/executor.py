@@ -1,7 +1,7 @@
 
 __all__ = [
     "ErrorInfo",
-    "WorkEvent",
+    "ExecEvent",
     "Executor",
     "ThreadPoolExecutor"
 ]
@@ -14,15 +14,15 @@ import traceback
 from queue import SimpleQueue
 import uuid
 
-from .context import Context, DataRef
+from .context import Context, DataRef, SimpleDataRef, DataRefFactory
 from .expr import Expr
 
 
-WorkID = NewType("WorkID", str)
+TaskID = NewType("TaskID", str)
 
 @dataclass(slots=True, frozen=True)
-class _WorkItem:
-    uid: WorkID
+class TaskItem:
+    uid: TaskID
     source: int | str
     context: Context
     args: tuple[Expr, ...] = field(default_factory=tuple)
@@ -30,7 +30,7 @@ class _WorkItem:
     error_traceback: bool = False
 
 
-class WorkStatus(StrEnum):
+class TaskStatus(StrEnum):
     SUCCESS = "success"
     FAILED = "failed"
     CANCELLED = "cancelled"
@@ -48,23 +48,23 @@ class ErrorInfo:
 
 
 @dataclass(slots=True, frozen=True)
-class WorkEvent:
-    work_id: WorkID | None
-    status: WorkStatus
+class ExecEvent:
+    task_id: TaskID | None
+    status: TaskStatus
     value: DataRef | None = None
     error_info: ErrorInfo | None = None
 
     def is_success(self) -> bool:
-        return self.status == WorkStatus.SUCCESS
+        return self.status == TaskStatus.SUCCESS
 
     def is_failed(self) -> bool:
-        return self.status == WorkStatus.FAILED
+        return self.status == TaskStatus.FAILED
 
     def is_cancelled(self) -> bool:
-        return self.status == WorkStatus.CANCELLED
+        return self.status == TaskStatus.CANCELLED
 
     def is_shutdown(self) -> bool:
-        return self.status == WorkStatus.SHUTDOWN
+        return self.status == TaskStatus.SHUTDOWN
 
 
 class Executor:
@@ -92,37 +92,37 @@ class Executor:
         source: int | str,
         context: Context,
         /,
-        *args: Expr,
-        **kwargs: Expr
-    ) -> WorkID:
+        args: tuple[Expr, ...] = (),
+        kwargs: dict[str, Expr] = {}
+    ) -> TaskID:
         """Submits a task to be executed with the given arguments.
 
         Args:
             source (int | str): Unique ID of callable registered or source code.
             context (Context): Necessary memories for expressions to evaluate.
-            *args (Expr): Expressions for positional arguments.
-            **kwargs (Expr): Expressions for keyword arguments.
+            args (tuple of Expr): Expressions for positional arguments.
+            kwargs (dict[str, Expr]): Expressions for keyword arguments.
 
         Returns:
             int: UID of the created work.
         """
         raise NotImplementedError
 
-    def wait(self) -> WorkEvent:
+    def wait(self) -> ExecEvent:
         """Wait for the next work event.
 
         Returns:
-            WorkEvent: an dataclass containing
-            - work_id (int | None): The work ID returned by `submit`.
-            - status (WorkStatus): success, failed, cancelled or shutdown.
+            ExecEvent: an dataclass containing
+            - task_id (int | None): The work ID returned by `submit`.
+            - status (TaskStatus): success, failed, cancelled or shutdown.
             - value (DataRef | None): Data reference of the returned result.
                 Ready for being put back into a context, or directly get the value.
             - error_info (ErrorInfo | None): Error information.
         """
         raise NotImplementedError
 
-    def cancel(self, work_id: WorkID, /) -> bool:
-        """Cancels the work with the given work_id."""
+    def cancel(self, task_id: TaskID, /) -> bool:
+        """Cancels the work with the given task_id."""
         raise NotImplementedError
 
     def shutdown(self, wait: bool = True) -> None:
@@ -131,49 +131,55 @@ class Executor:
 
 
 class ThreadPoolExecutor(Executor):
-    def __init__(self, max_workers: int | None = None) -> None:
+    def __init__(self, max_workers: int | None = None, data_ref: DataRefFactory = SimpleDataRef) -> None:
         """A thread pool executor.
 
         Args:
             max_workers (int | None, optional): Max number of workers.
+            data_ref (type): A callable returning a DataRef instance with no
+                parameters. DataRef refers to instances that have `get` and
+                `set` methods to load and save data.
+                Defaults to SimpleDataRef that stores values in memory directly.
         """
         from concurrent.futures import ThreadPoolExecutor as _TPE, Future
-        self._event_queue: SimpleQueue[WorkEvent] = SimpleQueue()
+        self._event_queue: SimpleQueue[ExecEvent] = SimpleQueue()
         self._executor = _TPE(max_workers)
-        self._futures: dict[WorkID, Future] = {}
+        self._futures: dict[TaskID, Future] = {}
+        self._data_ref_factory = data_ref
 
     @staticmethod
-    def _worker(event_queue: SimpleQueue, work_item: _WorkItem) -> None:
-        fid = work_item.source
-        context = work_item.context
+    def _worker(event_queue: SimpleQueue, task_item: TaskItem, data_ref_factory: DataRefFactory) -> None:
+        fid = task_item.source
+        context = task_item.context
         try:
             if isinstance(fid, int):
                 fn = Executor._callable_registry[fid]
-                args = [expr.eval(context) for expr in work_item.args]
-                kwargs = {key: expr.eval(context) for key, expr in work_item.kwargs.items()}
+                args = [expr.eval(context) for expr in task_item.args]
+                kwargs = {key: expr.eval(context) for key, expr in task_item.kwargs.items()}
                 result = fn(*args, **kwargs)
             elif isinstance(fid, str):
                 fn = lambda kwargs: exec(fid, kwargs)
-                kwargs = {key: expr.eval(context) for key, expr in work_item.kwargs.items()}
+                kwargs = {key: expr.eval(context) for key, expr in task_item.kwargs.items()}
                 result = fn(**kwargs)
             else:
                 raise TypeError(f"invalid type of work item source: {type(fid).__name__}")
 
-            event = WorkEvent(
-                work_id=work_item.uid,
-                status=WorkStatus.SUCCESS,
-                value=DataRef(result)
+            event = ExecEvent(
+                task_id=task_item.uid,
+                status=TaskStatus.SUCCESS,
+                value=data_ref_factory(result)
             )
         except Exception as e:
-            event = WorkEvent(
-                work_id=work_item.uid,
-                status=WorkStatus.FAILED,
+            event = ExecEvent(
+                task_id=task_item.uid,
+                status=TaskStatus.FAILED,
                 error_info=ErrorInfo(
                     e.__class__.__name__,
                     str(e.args[0]) if len(e.args) == 1 else repr(e.args),
-                    traceback.format_exc() if work_item.error_traceback else ""
+                    traceback.format_exc()# if task_item.error_traceback else ""
                 )
             )
+            print(event)
         event_queue.put(event)
 
     def submit(
@@ -181,44 +187,44 @@ class ThreadPoolExecutor(Executor):
         source: int | str,
         context: Context,
         /,
-        *args: Expr,
-        **kwargs: Expr
-    ) -> WorkID:
-        work_id = WorkID(str(uuid.uuid4()))
-        work_item = _WorkItem(work_id, source, context, args, kwargs) # TODO: error traceback field
+        args: tuple[Expr, ...] = (),
+        kwargs: dict[str, Expr] = {}
+    ) -> TaskID:
+        task_id = TaskID(str(uuid.uuid4()))
+        task_item = TaskItem(task_id, source, context, args, kwargs) # TODO: error traceback field
         fut = self._executor.submit(
-            self._worker, self._event_queue, work_item
+            self._worker, self._event_queue, task_item, self._data_ref_factory
         )
-        self._futures[work_id] = fut
-        return work_id
+        self._futures[task_id] = fut
+        return task_id
 
-    def wait(self) -> WorkEvent:
+    def wait(self) -> ExecEvent:
         event = self._event_queue.get()
 
-        if event.status in (WorkStatus.SUCCESS, WorkStatus.FAILED, WorkStatus.CANCELLED):
-            if event.work_id is not None:
-                self._futures.pop(event.work_id)
+        if event.status in (TaskStatus.SUCCESS, TaskStatus.FAILED, TaskStatus.CANCELLED):
+            if event.task_id is not None:
+                self._futures.pop(event.task_id)
 
         return event
 
-    def cancel(self, work_id: WorkID, /) -> bool:
+    def cancel(self, task_id: TaskID, /) -> bool:
         try:
-            fut = self._futures.pop(work_id)
+            fut = self._futures.pop(task_id)
         except KeyError:
             return False
 
         if fut.cancel():
-            self._event_queue.put(WorkEvent(work_id, WorkStatus.CANCELLED))
+            self._event_queue.put(ExecEvent(task_id, TaskStatus.CANCELLED))
             return True
         return False
 
     def shutdown(self, wait: bool = True) -> None:
         self._executor.shutdown(wait=False, cancel_futures=True)
 
-        for work_id in self._futures.keys():
-            self._event_queue.put(WorkEvent(work_id, WorkStatus.CANCELLED))
+        for task_id in self._futures.keys():
+            self._event_queue.put(ExecEvent(task_id, TaskStatus.CANCELLED))
 
-        self._event_queue.put(WorkEvent(None, WorkStatus.SHUTDOWN))
+        self._event_queue.put(ExecEvent(None, TaskStatus.SHUTDOWN))
 
         if wait:
             self._executor.shutdown(wait=True)
