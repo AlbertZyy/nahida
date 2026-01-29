@@ -14,7 +14,7 @@ __all__ = [
 ]
 
 from typing import Any, overload, Literal
-from collections.abc import Iterable
+from collections.abc import Iterable, Iterator
 
 from . import _objbase
 from . import context as _ctx
@@ -249,6 +249,7 @@ class Execute(_Recruiter, _ContextReader, Node):
 
     def order(self, context: _ctx.Context):
         return OrderItem(
+            self.uid,
             source=self._source,
             args=tuple(self._args),
             kwargs=self._kwargs,
@@ -280,9 +281,9 @@ class Branch(_ContextReader, Node):
         val, status = self.read_context(context, 0)
 
         if bool(val) and status:
-            return OrderItem(recruit=self.true.downstream_nodes())
+            return OrderItem(self.uid, recruit=self.true.downstream_nodes())
         else:
-            return OrderItem(recruit=self.false.downstream_nodes())
+            return OrderItem(self.uid, recruit=self.false.downstream_nodes())
 
 
 class Repeat(_ContextReader, Node):
@@ -292,7 +293,6 @@ class Repeat(_ContextReader, Node):
         _ContextReader.__init__(self)
         self._downstreams_iter = _Recruiter()
         self._downstreams_stop = _Recruiter()
-        self._iterator = None
         if iterable is not None:
             self.subs(iterable)
 
@@ -307,26 +307,33 @@ class Repeat(_ContextReader, Node):
         return self._downstreams_stop
 
     def order(self, context: _ctx.Context):
-        if self._iterator is None:
-            iterable = self.read_context(context, 0)[0]
-            self._iterator = iter(iterable)
-        try:
-            current = next(self._iterator)
-        except StopIteration:
-            self._iterator = None
-            return OrderItem(
-                recruit=self.stop.downstream_nodes(),
-                control=FlowControl.NONE
-            )
-
-        return OrderItem(
-            release=(current,),
-            recruit=self.iter.downstream_nodes(),
-            control=FlowControl.ENTER
+        iterable = self.read_context(context, 0)[0]
+        repeat_iter = Repeat.Iter(
+            self, iter(iterable),
+            self.iter.downstream_nodes(), self.stop.downstream_nodes()
         )
+        return OrderItem(self.uid, recruit={repeat_iter})
 
-    def exit(self) -> None:
-        self._iterator = None
+    class Iter(Node):
+        def __init__(self, parent: Repeat, iterator: Iterator, ds_iter: set[Node], ds_stop: set[Node]) -> None:
+            super().__init__()
+            self._parent = parent
+            self._ds_iter = ds_iter
+            self._ds_stop = ds_stop
+            self._iterator = iterator
+
+        def order(self, context: _ctx.Context) -> OrderItem:
+            try:
+                current = next(self._iterator)
+            except StopIteration:
+                return OrderItem(self._parent.uid, recruit=self._ds_stop)
+            return OrderItem(
+                self._parent.uid,
+                release=(current,),
+                recruit=self._ds_iter,
+                control=FlowControl.ENTER,
+                recall=self.order
+            )
 
     @overload
     @classmethod
@@ -352,7 +359,7 @@ class Repeat(_ContextReader, Node):
 class Break(_Recruiter, Node):
     """Break the repeat loop."""
     def order(self, context: _ctx.Context):
-        return OrderItem(recruit=self.downstream_nodes(), control=FlowControl.EXIT)
+        return OrderItem(self.uid, recruit=self.downstream_nodes(), control=FlowControl.EXIT)
 
 
 class Join(_Recruiter, Node):
@@ -366,16 +373,16 @@ class Join(_Recruiter, Node):
     def order(self, context: _ctx.Context) -> OrderItem:
         if all(self.flags):
             self.flags = [False] * len(self.receivers)
-            return OrderItem(recruit=self.downstream_nodes())
+            return OrderItem(self.uid, recruit=self.downstream_nodes())
         else:
-            return OrderItem()
-
+            return OrderItem(self.uid)
 
     class Receiver(Node):
-        def __init__(self, parent: "Join", index: int):
+        def __init__(self, parent: Join, index: int):
+            super().__init__()
             self.parent = parent
             self.index = index
 
         def order(self, context: _ctx.Context):
             self.parent.flags[self.index] = True
-            return OrderItem(recruit={self.parent,})
+            return OrderItem(self.uid, recruit={self.parent,})

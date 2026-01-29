@@ -3,7 +3,6 @@ from __future__ import annotations
 __all__ = [] # NOTE: not allowed to be imported by *
 
 from typing import Any, TypeGuard
-from collections.abc import Callable
 
 from . import errors as _err
 from ._objbase import UIDMixin
@@ -53,8 +52,8 @@ class VariableExpr(Expr):
         super().__init__()
         self._target_uid = target_uid
 
-    def __getitem__(self, index: int | str, /) -> VariablGetItemExpr:
-        return VariablGetItemExpr(self._target_uid, index)
+    def __getitem__(self, index: int | str, /) -> VariableGetItemExpr:
+        return VariableGetItemExpr(self._target_uid, index)
 
     def eval(self, context: Context, /) -> Any:
         try:
@@ -66,7 +65,7 @@ class VariableExpr(Expr):
         return {self._target_uid}
 
 
-class VariablGetItemExpr(Expr):
+class VariableGetItemExpr(Expr):
     def __init__(self, target_uid: int, index: Any, /) -> None:
         super().__init__()
         self._target_uid = target_uid
@@ -99,8 +98,8 @@ class RefExpr(Expr):
     Raises *DataNotFoundError* if the UID of this expression does not exist in
     the context.
     """
-    def __getitem__(self, index: int | str, /) -> VariablGetItemExpr:
-        return VariablGetItemExpr(self.uid, index)
+    def __getitem__(self, index: int | str, /) -> VariableGetItemExpr:
+        return VariableGetItemExpr(self.uid, index)
 
     def eval(self, context: Context, /) -> Any:
         try:

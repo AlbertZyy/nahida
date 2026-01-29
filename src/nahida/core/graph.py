@@ -119,14 +119,14 @@ class Graph(_ob.NameMixin, _ob.UIDMixin):
     def lambdify(
         self,
         *,
-        data_refer: DataRefFactory = SimpleDataRef,
+        data_ref: DataRefFactory = SimpleDataRef,
         scheduler: Scheduler | None = None,
         executor: Executor | None = None
     ):
         """Transform the graph to a lambda function.
 
         Args:
-            data_refer (DataRefFactory): The data reference class.
+            data_ref (DataRefFactory): The data reference class.
                 Defaults to `SimpleDataRef`.
             scheduler (Scheduler, optional): The scheduler defining the
                 execution flow.
@@ -149,7 +149,7 @@ class Graph(_ob.NameMixin, _ob.UIDMixin):
                 initial: dict[int | str, Any] = {}
                 initial.update(enumerate(args))
                 initial.update(kwargs)
-                context[self.uid] = data_refer(initial)
+                context[self.uid] = data_ref(initial)
 
             context = scheduler.forward(context, self._starters, executor=executor)
             return self._construct_output(context)
