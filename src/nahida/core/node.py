@@ -20,7 +20,7 @@ from . import _objbase
 from . import context as _ctx
 from . import errors as _err
 from . import expr as _expr
-from .scheduler import FlowControl, OrderItem
+from .scheduler import FlowControl, OrderItem, Coroutine
 
 
 type Expr = _expr.Expr
@@ -31,10 +31,10 @@ class Node(_objbase.NameMixin, _expr.RefExpr):
 
     Nodes are computational units that can be connected to other nodes, and
     are designed with the following interfaces:
-      - `order`: order execution/scheduling tasks to the controller,
+      - `activate`: activate execution/scheduling tasks to the controller,
       - `write`: put output values to the context,
 
-    where `order` is abstract and must be implemented by subclasses, and
+    where `activate` is abstract and must be implemented by subclasses, and
     `write` is defaults to putting values into the context dict directly.
     Here `context` is a dictionary of node IDs to the
     corresponding output values.
@@ -42,7 +42,7 @@ class Node(_objbase.NameMixin, _expr.RefExpr):
     def __init__(self, *, uid: int | None = None) -> None:
         _expr.Expr.__init__(self, uid=uid)
 
-    def order(self, context: _ctx.Context) -> OrderItem:
+    def activate(self, context: _ctx.Context) -> Coroutine:
         """Return a task to be submitted to the task queue.
 
         A task item is a dataclass containing the following fields:
@@ -247,9 +247,10 @@ class Execute(_Recruiter, _ContextReader, Node):
         _Recruiter.__init__(self)
         self._source = source
 
-    def order(self, context: _ctx.Context):
-        return OrderItem(
+    def activate(self, context: _ctx.Context):
+        yield OrderItem(
             self.uid,
+            context=context,
             source=self._source,
             args=tuple(self._args),
             kwargs=self._kwargs,
@@ -277,13 +278,13 @@ class Branch(_ContextReader, Node):
         """Execute downstream nodes when condition is False."""
         return self._downstreams_false
 
-    def order(self, context: _ctx.Context):
+    def activate(self, context: _ctx.Context):
         val, status = self.read_context(context, 0)
 
         if bool(val) and status:
-            return OrderItem(self.uid, recruit=self.true.downstream_nodes())
+            yield OrderItem(self.uid, context=context, recruit=self.true.downstream_nodes())
         else:
-            return OrderItem(self.uid, recruit=self.false.downstream_nodes())
+            yield OrderItem(self.uid, context=context, recruit=self.false.downstream_nodes())
 
 
 class Repeat(_ContextReader, Node):
@@ -306,34 +307,21 @@ class Repeat(_ContextReader, Node):
         """Execute downstream nodes when the loop is stopped."""
         return self._downstreams_stop
 
-    def order(self, context: _ctx.Context):
+    def activate(self, context: _ctx.Context):
         iterable = self.read_context(context, 0)[0]
-        repeat_iter = Repeat.Iter(
-            self, iter(iterable),
-            self.iter.downstream_nodes(), self.stop.downstream_nodes()
-        )
-        return OrderItem(self.uid, recruit={repeat_iter})
-
-    class Iter(Node):
-        def __init__(self, parent: Repeat, iterator: Iterator, ds_iter: set[Node], ds_stop: set[Node]) -> None:
-            super().__init__()
-            self._parent = parent
-            self._ds_iter = ds_iter
-            self._ds_stop = ds_stop
-            self._iterator = iterator
-
-        def order(self, context: _ctx.Context) -> OrderItem:
-            try:
-                current = next(self._iterator)
-            except StopIteration:
-                return OrderItem(self._parent.uid, recruit=self._ds_stop)
-            return OrderItem(
-                self._parent.uid,
-                release=(current,),
-                recruit=self._ds_iter,
-                control=FlowControl.ENTER,
-                recall=self.order
+        for current in iterable:
+            context[self.uid] = context.new((current,))
+            yield OrderItem(
+                self.uid,
+                context=context,
+                recruit=self.iter.downstream_nodes(),
+                control=FlowControl.ENTER
             )
+        yield OrderItem(
+            self.uid,
+            context=context,
+            recruit=self.stop.downstream_nodes()
+        )
 
     @overload
     @classmethod
@@ -358,8 +346,13 @@ class Repeat(_ContextReader, Node):
 
 class Break(_Recruiter, Node):
     """Break the repeat loop."""
-    def order(self, context: _ctx.Context):
-        return OrderItem(self.uid, recruit=self.downstream_nodes(), control=FlowControl.EXIT)
+    def activate(self, context: _ctx.Context):
+        yield OrderItem(
+            self.uid,
+            context=context,
+            recruit=self.downstream_nodes(),
+            control=FlowControl.EXIT
+        )
 
 
 class Join(_Recruiter, Node):
@@ -370,12 +363,12 @@ class Join(_Recruiter, Node):
         self.receivers = tuple(Join.Receiver(self, i) for i in range(num))
         self.flags = [False] * num
 
-    def order(self, context: _ctx.Context) -> OrderItem:
+    def activate(self, context: _ctx.Context):
         if all(self.flags):
             self.flags = [False] * len(self.receivers)
-            return OrderItem(self.uid, recruit=self.downstream_nodes())
+            yield OrderItem(self.uid, context=context, recruit=self.downstream_nodes())
         else:
-            return OrderItem(self.uid)
+            yield OrderItem(self.uid)
 
     class Receiver(Node):
         def __init__(self, parent: Join, index: int):
@@ -383,6 +376,10 @@ class Join(_Recruiter, Node):
             self.parent = parent
             self.index = index
 
-        def order(self, context: _ctx.Context):
+        def activate(self, context: _ctx.Context):
             self.parent.flags[self.index] = True
-            return OrderItem(self.uid, recruit={self.parent,})
+            return OrderItem(
+                self.uid,
+                context=context,
+                recruit={self.parent,}
+            )

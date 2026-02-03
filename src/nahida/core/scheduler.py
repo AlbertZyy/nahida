@@ -10,7 +10,7 @@ __all__ = [
 from typing import Sequence, Protocol, Any
 from dataclasses import dataclass, field
 from collections import deque
-from collections.abc import Collection, Callable
+from collections.abc import Collection, Callable, Generator
 from enum import StrEnum
 
 from .context import Context, SimpleDataRef, DataRefFactory
@@ -37,7 +37,8 @@ class FlowControl(StrEnum):
 
 
 empty = object()
-type OrderFunc = Callable[[Context], OrderItem]
+type Coroutine = Generator[OrderItem, Any, Any]
+type CoroutineFunc = Callable[[Context], Coroutine]
 
 @dataclass(slots=True, frozen=True)
 class OrderItem:
@@ -62,28 +63,34 @@ class OrderItem:
             Have effect only for `FlowControl.ENTER`.
     """
     uid: int
-    release: Any = empty
+    context: Context = field(default_factory=Context)
     source: int | str | None = None
     args: tuple[Expr, ...] = field(default_factory=tuple)
     kwargs: dict[str, Expr] = field(default_factory=dict)
     recruit: Collection[Node] | None = None
     control: FlowControl = FlowControl.NONE
-    recall: OrderFunc | None = None
-    exit: OrderFunc | None = None
 
 
 class Node(Protocol):
     @property
     def uid(self) -> int: ...
-    def order(self, context: Context, /) -> OrderItem: ...
+    def activate(self, context: Context, /) -> Coroutine: ...
     def exit(self) -> None: ...
+
+
+class ScopeState:
+    _stack: list[tuple[Coroutine, Coroutine]]
+    def push(
+        self,
+        recall: Coroutine | None = None,
+    ): ...
+    def pop(self) -> tuple[Coroutine, Coroutine]: ...
 
 
 @dataclass(slots=True)
 class NodeScope:
     count: int = 1
-    recall: OrderFunc | None = None
-    exit: OrderFunc | None = None
+    recall: Coroutine | None = None
     back_id: int | None = None
     cancelled: bool = False
 
@@ -103,11 +110,11 @@ class ScopeManager:
         try:
             return self.scope_table[item]
         except KeyError:
-            raise ValueError(f"invalid scope id {item}")
+            raise KeyError(f"invalid scope id {item}")
 
-    def create_scope(self, back_id: int, recall: OrderFunc | None, exit: OrderFunc | None) -> int:
+    def create_scope(self, back_id: int, recall: Coroutine) -> int:
         new_id = self._scope_count
-        new_scope = NodeScope(0, recall, exit, back_id)
+        new_scope = NodeScope(0, recall, back_id)
         self.scope_table[new_id] = new_scope
         self._scope_count += 1
         return new_id
@@ -118,8 +125,13 @@ class ScopeManager:
     def on_recruit(self, scope_id: int, n: int) -> None:
         self[scope_id].count += n
 
-    def cancel_scope(self, scope_id: int) -> None:
+    def cancel_scope(self, scope_id: int) -> int:
         self[scope_id].cancelled = True
+        back_id = self[scope_id].back_id
+        if back_id is None:
+            raise RuntimeError("cannot cancel the root scope as "
+                               "no back scope found")
+        return back_id
 
     def check_scope_done(self, scope_id: int) -> bool:
         if scope_id not in self.scope_table:
@@ -128,19 +140,12 @@ class ScopeManager:
         scope = self.scope_table[scope_id]
         return scope.count < 1 or scope.cancelled == True
 
-    def get_recall(self, scope_id: int) -> tuple[OrderFunc, int] | None:
+    def get_recall(self, scope_id: int) -> tuple[Coroutine, int] | None:
         scope = self[scope_id]
 
         if scope.recall is not None:
             assert scope.back_id is not None, "back_id cannot be None if recall was specified"
             return scope.recall, scope.back_id
-
-    def get_exit(self, scope_id: int) -> tuple[OrderFunc, int] | None:
-        scope = self[scope_id]
-
-        if scope.exit is not None:
-            assert scope.back_id is not None, "back_id cannot be None if exit was specified"
-            return scope.exit, scope.back_id
 
 
 class Scheduler:
@@ -174,24 +179,24 @@ class ConcurrentScheduler(Scheduler):
         from itertools import chain
         # TODO: add checking for circular dependencies!
         scope_manager = ScopeManager(len(starters))
-        ready_nodes: deque[tuple[OrderFunc, int]] = deque()
+        ready_nodes: deque[tuple[Coroutine, int]] = deque()
 
         for n in starters:
-            ready_nodes.append((n.order, 0))
+            ready_nodes.append((n.activate(context), 0))
 
-        inflight: dict[TaskID, tuple[OrderFunc, int, OrderItem]] = {}
+        inflight: dict[TaskID, tuple[Coroutine, int, OrderItem]] = {}
 
         while True:
             while ready_nodes and len(inflight) < self._max_inflight:
-                node, scope_id = ready_nodes.popleft()
-                order_item = node(context)
-
-                if order_item.release is not empty:
-                    context[order_item.uid] = self._data_ref_factory(order_item.release)
+                coro, scope_id = ready_nodes.popleft()
+                try:
+                    order_item = next(coro)
+                except StopIteration:
+                    continue
 
                 if order_item.source is None:
                     self._recruit_downstreams_and_recall_if_scope_done(
-                        ready_nodes, scope_manager, order_item, scope_id
+                        coro, ready_nodes, scope_manager, order_item, scope_id
                     )
                     continue
 
@@ -200,10 +205,10 @@ class ConcurrentScheduler(Scheduler):
                     uid_set |= expr.refs()
 
                 wid = executor.submit(
-                    order_item.source, context.view(uid_set),
+                    order_item.source, order_item.context.view(uid_set),
                     order_item.args, order_item.kwargs
                 )
-                inflight[wid] = (node, scope_id, order_item)
+                inflight[wid] = (coro, scope_id, order_item)
 
             if len(inflight) == 0:
                 break
@@ -214,12 +219,12 @@ class ConcurrentScheduler(Scheduler):
                 if event.is_shutdown():
                     break
             else:
-                node, scope_id, order_item = inflight.pop(event.task_id)
+                coro, scope_id, order_item = inflight.pop(event.task_id)
                 if event.is_success():
                     if event.value is not None:
-                        context[order_item.uid] = event.value
+                        order_item.context[order_item.uid] = event.value
                     self._recruit_downstreams_and_recall_if_scope_done(
-                        ready_nodes, scope_manager, order_item, scope_id
+                        coro, ready_nodes, scope_manager, order_item, scope_id
                     )
                 else:
                     scope_manager.on_node_complete(scope_id)
@@ -230,7 +235,8 @@ class ConcurrentScheduler(Scheduler):
     @classmethod
     def _recruit_downstreams_and_recall_if_scope_done(
         cls,
-        ready_nodes: deque[tuple[OrderFunc, int]],
+        coro: Coroutine,
+        ready_nodes: deque[tuple[Coroutine, int]],
         scope_manager: ScopeManager,
         order_item: OrderItem,
         scope_id: int
@@ -240,13 +246,10 @@ class ConcurrentScheduler(Scheduler):
             return
 
         if order_item.control == FlowControl.ENTER:
-            scope_id = scope_manager.create_scope(scope_id, order_item.recall, order_item.exit)
+            scope_id = scope_manager.create_scope(scope_id, coro)
 
         elif order_item.control == FlowControl.EXIT:
-            scope_manager.cancel_scope(scope_id)
-            exit_and_back_id = scope_manager.get_exit(scope_id)
-            if exit_and_back_id:
-                ready_nodes.append(exit_and_back_id)
+            scope_id = scope_manager.cancel_scope(scope_id)
 
         elif order_item.control == FlowControl.NONE:
             scope_manager.on_node_complete(scope_id)
@@ -257,14 +260,15 @@ class ConcurrentScheduler(Scheduler):
         if order_item.recruit:
             scope_manager.on_recruit(scope_id, len(order_item.recruit))
             for nxt in order_item.recruit:
-                ready_nodes.append((nxt.order, scope_id))
+                ready_nodes.append((nxt.activate(order_item.context), scope_id))
 
-        cls._recall_if_scope_done(ready_nodes, scope_manager, scope_id)
+        if order_item != FlowControl.EXIT:
+            cls._recall_if_scope_done(ready_nodes, scope_manager, scope_id)
 
     @classmethod
     def _recall_if_scope_done(
         cls,
-        ready_nodes: deque[tuple[OrderFunc, int]],
+        ready_nodes: deque[tuple[Coroutine, int]],
         scope_manager: ScopeManager,
         scope_id: int
     ):

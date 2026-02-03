@@ -2,7 +2,7 @@ from __future__ import annotations
 
 __all__ = ["DataRef", "SimpleDataRef", "Context"]
 
-from typing import Any, Protocol
+from typing import Any, Protocol, Self
 from collections.abc import Callable
 
 
@@ -37,9 +37,18 @@ class SimpleDataRef:
 
 class Context:
     _data: dict[int, DataRef]
+    _trace: tuple[int, ...]
 
-    def __init__(self):
-        self._data = {}
+    def __init__(
+        self,
+        data: dict[int, DataRef] | None = None,
+        trace: tuple[int, ...] | None = None,
+        *,
+        data_ref_factory: DataRefFactory = SimpleDataRef
+    ) -> None:
+        self._data = data if (data is not None) else {}
+        self._trace = trace if (trace is not None) else ()
+        self._data_ref_factory = data_ref_factory
 
     def __getitem__(self, uid: int, /) -> DataRef:
         return self._data[uid]
@@ -53,6 +62,9 @@ class Context:
     def __len__(self) -> int:
         return len(self._data)
 
+    def new(self, value: Any = empty, /):
+        return self._data_ref_factory(value)
+
     def view(self, uids: set[int], /) -> Context:
         ctx = Context()
         for index in uids:
@@ -61,6 +73,13 @@ class Context:
             except KeyError:
                 pass
         return ctx
+
+    def mark(self, uid: int, /) -> None:
+        self._trace = self._trace + (uid,)
+
+    def fork(self) -> Self:
+        _self_type = type(self)
+        return _self_type(self._data.copy(), self._trace)
 
     def dump(self) -> dict[int, str]:
         raise NotImplementedError()
