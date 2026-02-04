@@ -1,21 +1,33 @@
 from __future__ import annotations
 
-__all__ = ["DataRef", "Context"]
+__all__ = ["DataRef", "SimpleDataRef", "Context"]
 
-from typing import Any
+from typing import Any, Protocol, Self
+from collections.abc import Callable
 
 
-class DataRef:
-    empty = object()
+empty = object()
+
+
+class DataRef(Protocol):
+    def get(self, item: Any = empty, /) -> Any:
+        """Get value from the data reference."""
+    def set(self, value: Any) -> None:
+        """Set value to the data reference."""
+
+type DataRefFactory = Callable[..., DataRef]
+
+
+class SimpleDataRef:
     _value: Any
 
     def __init__(self, value: Any = empty, /) -> None:
         self._value = value
 
     def get(self, item: Any = empty, /) -> Any:
-        if self._value is DataRef.empty:
+        if self._value is empty:
             raise ValueError()
-        if item is not DataRef.empty:
+        if item is not empty:
             return self._value[item]
         return self._value
 
@@ -25,9 +37,18 @@ class DataRef:
 
 class Context:
     _data: dict[int, DataRef]
+    _trace: tuple[int, ...]
 
-    def __init__(self):
-        self._data = {}
+    def __init__(
+        self,
+        data: dict[int, DataRef] | None = None,
+        trace: tuple[int, ...] | None = None,
+        *,
+        data_ref_factory: DataRefFactory = SimpleDataRef
+    ) -> None:
+        self._data = data if (data is not None) else {}
+        self._trace = trace if (trace is not None) else ()
+        self._data_ref_factory = data_ref_factory
 
     def __getitem__(self, uid: int, /) -> DataRef:
         return self._data[uid]
@@ -41,6 +62,9 @@ class Context:
     def __len__(self) -> int:
         return len(self._data)
 
+    def new(self, value: Any = empty, /):
+        return self._data_ref_factory(value)
+
     def view(self, uids: set[int], /) -> Context:
         ctx = Context()
         for index in uids:
@@ -49,6 +73,13 @@ class Context:
             except KeyError:
                 pass
         return ctx
+
+    def mark(self, uid: int, /) -> None:
+        self._trace = self._trace + (uid,)
+
+    def fork(self) -> Self:
+        _self_type = type(self)
+        return _self_type(self._data.copy(), self._trace)
 
     def dump(self) -> dict[int, str]:
         raise NotImplementedError()

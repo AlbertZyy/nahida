@@ -3,8 +3,6 @@
 from __future__ import annotations
 
 __all__ = [
-    "FlowCtrl",
-    "TaskItem",
     "Node",
     "Execute",
     "Branch",
@@ -15,44 +13,15 @@ __all__ = [
 
 from typing import Any, overload, Literal
 from collections.abc import Iterable
-from dataclasses import dataclass, field
-from enum import StrEnum
 
 from . import _objbase
 from . import context as _ctx
 from . import errors as _err
 from . import expr as _expr
+from . import scheduler as _sch
 
 
 type Expr = _expr.Expr
-empty = object()
-
-
-class FlowCtrl(StrEnum):
-    """Workflow control instruction after execution."""
-
-    NONE = "none"
-    """Do nothing and be removed from the tasks."""
-
-    ENTER = "enter"
-    """Require a new scope for downstreams."""
-
-    EXIT = "exit"
-    """Require cancel the current scope."""
-
-
-@dataclass(slots=True, frozen=True)
-class TaskItem:
-    """Task item for a node.
-
-    See `Node.submit` for details.
-    """
-    source: int | str | None = None
-    args: tuple[Expr, ...] = field(default_factory=tuple)
-    kwargs: dict[str, Expr] = field(default_factory=dict)
-    output: Any = empty
-    recruit: set[Node] | None = None
-    control: FlowCtrl = FlowCtrl.NONE
 
 
 class Node(_objbase.NameMixin, _expr.RefExpr):
@@ -60,10 +29,10 @@ class Node(_objbase.NameMixin, _expr.RefExpr):
 
     Nodes are computational units that can be connected to other nodes, and
     are designed with the following interfaces:
-      - `submit`: submit execution/scheduling tasks to the controller,
+      - `activate`: activate execution/scheduling tasks to the controller,
       - `write`: put output values to the context,
 
-    where `submit` is abstract and must be implemented by subclasses, and
+    where `activate` is abstract and must be implemented by subclasses, and
     `write` is defaults to putting values into the context dict directly.
     Here `context` is a dictionary of node IDs to the
     corresponding output values.
@@ -71,7 +40,7 @@ class Node(_objbase.NameMixin, _expr.RefExpr):
     def __init__(self, *, uid: int | None = None) -> None:
         _expr.Expr.__init__(self, uid=uid)
 
-    def submit(self, context: _ctx.Context) -> TaskItem:
+    def activate(self, context: _ctx.Context) -> _sch.Coroutine:
         """Return a task to be submitted to the task queue.
 
         A task item is a dataclass containing the following fields:
@@ -88,14 +57,9 @@ class Node(_objbase.NameMixin, _expr.RefExpr):
             context (dict[int, Any]): The context of the environment.
 
         Returns:
-            TaskItem: The task item to be submitted to the task queue.
+            OrderItem: The task item to be submitted to the task queue.
         """
         raise NotImplementedError
-
-    def exit(self) -> None:
-        """Called after any scope that created by this node is exited by
-        another node."""
-        return
 
 
 class _ContextReader:
@@ -256,9 +220,10 @@ class _Recruiter:
         """
         self._downstreams.difference_update(uid)
 
-    def downstream_nodes(self) -> set[Node]:
+    def downstream_activates(self) -> set[_sch.CoroutineFunc]:
         """Return downstream nodes."""
-        return set(_objbase.get_entity(uid, Node) for uid in self._downstreams)
+        return set(_objbase.get_entity(uid, Node).activate
+                   for uid in self._downstreams)
 
     @property
     def downstreams(self) -> set[int]:
@@ -276,12 +241,14 @@ class Execute(_Recruiter, _ContextReader, Node):
         _Recruiter.__init__(self)
         self._source = source
 
-    def submit(self, context: _ctx.Context):
-        return TaskItem(
+    def activate(self, context: _ctx.Context):
+        yield _sch.OrderItem(
+            self.uid,
+            context=context,
             source=self._source,
             args=tuple(self._args),
             kwargs=self._kwargs,
-            recruit=self.downstream_nodes()
+            recruit=self.downstream_activates()
         )
 
 
@@ -305,13 +272,13 @@ class Branch(_ContextReader, Node):
         """Execute downstream nodes when condition is False."""
         return self._downstreams_false
 
-    def submit(self, context: _ctx.Context):
+    def activate(self, context: _ctx.Context):
         val, status = self.read_context(context, 0)
 
         if bool(val) and status:
-            return TaskItem(recruit=self.true.downstream_nodes())
+            yield _sch.OrderItem(self.uid, context=context, recruit=self.true.downstream_activates())
         else:
-            return TaskItem(recruit=self.false.downstream_nodes())
+            yield _sch.OrderItem(self.uid, context=context, recruit=self.false.downstream_activates())
 
 
 class Repeat(_ContextReader, Node):
@@ -321,7 +288,6 @@ class Repeat(_ContextReader, Node):
         _ContextReader.__init__(self)
         self._downstreams_iter = _Recruiter()
         self._downstreams_stop = _Recruiter()
-        self._iterator = None
         if iterable is not None:
             self.subs(iterable)
 
@@ -335,27 +301,21 @@ class Repeat(_ContextReader, Node):
         """Execute downstream nodes when the loop is stopped."""
         return self._downstreams_stop
 
-    def submit(self, context: _ctx.Context):
-        if self._iterator is None:
-            iterable = self.read_context(context, 0)[0]
-            self._iterator = iter(iterable)
-        try:
-            current = next(self._iterator)
-        except StopIteration:
-            self._iterator = None
-            return TaskItem(
-                recruit=self.stop.downstream_nodes(),
-                control=FlowCtrl.NONE
+    def activate(self, context: _ctx.Context):
+        iterable = self.read_context(context, 0)[0]
+        for current in iterable:
+            context[self.uid] = context.new((current,))
+            yield _sch.OrderItem(
+                self.uid,
+                context=context,
+                recruit=self.iter.downstream_activates(),
+                control=_sch.FlowControl.AWAIT
             )
-        context[self.uid] = _ctx.DataRef((current,))
-
-        return TaskItem(
-            recruit=self.iter.downstream_nodes(),
-            control=FlowCtrl.ENTER
+        yield _sch.OrderItem(
+            self.uid,
+            context=context,
+            recruit=self.stop.downstream_activates()
         )
-
-    def exit(self) -> None:
-        self._iterator = None
 
     @overload
     @classmethod
@@ -380,8 +340,13 @@ class Repeat(_ContextReader, Node):
 
 class Break(_Recruiter, Node):
     """Break the repeat loop."""
-    def submit(self, context: _ctx.Context):
-        return TaskItem(recruit=self.downstream_nodes(), control=FlowCtrl.EXIT)
+    def activate(self, context: _ctx.Context):
+        yield _sch.OrderItem(
+            self.uid,
+            context=context,
+            recruit=self.downstream_activates(),
+            control=_sch.FlowControl.EXIT
+        )
 
 
 class Join(_Recruiter, Node):
@@ -392,19 +357,23 @@ class Join(_Recruiter, Node):
         self.receivers = tuple(Join.Receiver(self, i) for i in range(num))
         self.flags = [False] * num
 
-    def submit(self, context: _ctx.Context) -> TaskItem:
+    def activate(self, context: _ctx.Context):
         if all(self.flags):
             self.flags = [False] * len(self.receivers)
-            return TaskItem(recruit=self.downstream_nodes())
+            yield _sch.OrderItem(self.uid, context=context, recruit=self.downstream_activates())
         else:
-            return TaskItem()
-
+            yield _sch.OrderItem(self.uid)
 
     class Receiver(Node):
-        def __init__(self, parent: "Join", index: int):
+        def __init__(self, parent: Join, index: int):
+            super().__init__()
             self.parent = parent
             self.index = index
 
-        def submit(self, context: _ctx.Context):
+        def activate(self, context: _ctx.Context):
             self.parent.flags[self.index] = True
-            return TaskItem(recruit={self.parent,})
+            yield _sch.OrderItem(
+                self.uid,
+                context=context,
+                recruit={self.parent.activate,}
+            )
