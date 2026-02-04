@@ -7,13 +7,13 @@ __all__ = [
     "ConcurrentScheduler"
 ]
 
-from typing import Sequence, Protocol, Any
+from typing import Sequence, Any
 from dataclasses import dataclass, field
 from collections import deque
 from collections.abc import Collection, Callable, Generator
 from enum import StrEnum
 
-from .context import Context, SimpleDataRef, DataRefFactory
+from .context import Context
 from .expr import Expr
 from .executor import TaskID, Executor
 
@@ -22,23 +22,24 @@ class FlowControl(StrEnum):
     """Workflow control instruction after execution."""
 
     NONE = "none"
-    """Do nothing and be removed."""
+    """**Do nothing and remove this coroutine**"""
 
-    ENTER = "enter"
-    """**Enter a new scope**
+    AWAIT = "await"
+    """**Wait for all the recruited coroutines to complete**
 
-    Require a new scope for downstreams. Recall (recruit again) this node
-    when the scope exhausts naturely."""
+    Create a new scope for downstreams. Recall this coroutine
+    when the new scope exhausts naturely."""
 
     EXIT = "exit"
-    """**Exit current scope**
+    """**Try canceling the most recent upstream coroutine that is awaiting
+    and all its recruitments.**
 
-    Require cancel the current scope. Call `exit` method of the scope's creator node."""
+    Cancel the current scope."""
 
 
-empty = object()
 type Coroutine = Generator[OrderItem, Any, Any]
 type CoroutineFunc = Callable[[Context], Coroutine]
+
 
 @dataclass(slots=True, frozen=True)
 class OrderItem:
@@ -46,45 +47,20 @@ class OrderItem:
 
     Args:
         uid (int): A unique ID for saving data in the context.
-        release (Any, optional): Data released to the context before execution.
-            Note that this value will be covered by execution results, if
-            `source` is given.
         source (int | str | None, optional): The function ID or source code to
             submit to an executor.
         args (tuple of Expr, optional): positional arguments for execution.
         kwargs (dict[str, Expr], optional): keyword arguments for execution.
         control (FlowControl, optional): Workflow control instruction **after**
             execution. Defaults to `none`.
-        recall (Context -> OrderItem, optional): Make an new OrderItem when the
-            scope created exhausts naturely.
-            Have effect only for `FlowControl.ENTER`.
-        exit (Context -> OrderItem, optional): Make an new OrderItem when the
-            scope created was breaked by other nodes.
-            Have effect only for `FlowControl.ENTER`.
     """
     uid: int
     context: Context = field(default_factory=Context)
     source: int | str | None = None
     args: tuple[Expr, ...] = field(default_factory=tuple)
     kwargs: dict[str, Expr] = field(default_factory=dict)
-    recruit: Collection[Node] | None = None
+    recruit: Collection[CoroutineFunc] | None = None
     control: FlowControl = FlowControl.NONE
-
-
-class Node(Protocol):
-    @property
-    def uid(self) -> int: ...
-    def activate(self, context: Context, /) -> Coroutine: ...
-    def exit(self) -> None: ...
-
-
-class ScopeState:
-    _stack: list[tuple[Coroutine, Coroutine]]
-    def push(
-        self,
-        recall: Coroutine | None = None,
-    ): ...
-    def pop(self) -> tuple[Coroutine, Coroutine]: ...
 
 
 @dataclass(slots=True)
@@ -149,7 +125,7 @@ class ScopeManager:
 
 
 class Scheduler:
-    def forward(self, context: Context, starters: Sequence[Node], *, executor: Executor) -> Context:
+    def forward(self, context: Context, starters: Sequence[CoroutineFunc], *, executor: Executor) -> Context:
         """Forward computation of a node graph.
 
         Args:
@@ -162,27 +138,22 @@ class Scheduler:
 
 
 class ConcurrentScheduler(Scheduler):
-    def __init__(self, max_inflight: int = 1000, data_ref: DataRefFactory = SimpleDataRef) -> None:
+    def __init__(self, max_inflight: int = 1000) -> None:
         """A concurrent scheduler.
 
         Args:
             max_inflight (int): maximum number of tasks to be executed in parallel.
-            data_ref (type): A callable returning a DataRef instance with no
-                parameters. DataRef refers to instances that have `get` and
-                `set` methods to load and save data.
-                Defaults to SimpleDataRef that stores values in memory directly.
         """
         self._max_inflight = max_inflight
-        self._data_ref_factory = data_ref
 
-    def forward(self, context: Context, starters: Sequence[Node], *, executor: Executor) -> Context:
+    def forward(self, context: Context, starters: Sequence[CoroutineFunc], *, executor: Executor) -> Context:
         from itertools import chain
         # TODO: add checking for circular dependencies!
         scope_manager = ScopeManager(len(starters))
         ready_nodes: deque[tuple[Coroutine, int]] = deque()
 
         for n in starters:
-            ready_nodes.append((n.activate(context), 0))
+            ready_nodes.append((n(context), 0))
 
         inflight: dict[TaskID, tuple[Coroutine, int, OrderItem]] = {}
 
@@ -245,7 +216,7 @@ class ConcurrentScheduler(Scheduler):
         if scope_manager.check_scope_done(scope_id):
             return
 
-        if order_item.control == FlowControl.ENTER:
+        if order_item.control == FlowControl.AWAIT:
             scope_id = scope_manager.create_scope(scope_id, coro)
 
         elif order_item.control == FlowControl.EXIT:
@@ -260,10 +231,9 @@ class ConcurrentScheduler(Scheduler):
         if order_item.recruit:
             scope_manager.on_recruit(scope_id, len(order_item.recruit))
             for nxt in order_item.recruit:
-                ready_nodes.append((nxt.activate(order_item.context), scope_id))
+                ready_nodes.append((nxt(order_item.context), scope_id))
 
-        if order_item != FlowControl.EXIT:
-            cls._recall_if_scope_done(ready_nodes, scope_manager, scope_id)
+        cls._recall_if_scope_done(ready_nodes, scope_manager, scope_id)
 
     @classmethod
     def _recall_if_scope_done(

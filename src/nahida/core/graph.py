@@ -151,7 +151,11 @@ class Graph(_ob.NameMixin, _ob.UIDMixin):
                 initial.update(kwargs)
                 context[self.uid] = data_ref(initial)
 
-            context = scheduler.forward(context, self._starters, executor=executor)
+            context = scheduler.forward(
+                context,
+                [n.activate for n in self._starters],
+                executor=executor
+            )
             return self._construct_output(context)
 
         return runner

@@ -3,8 +3,6 @@
 from __future__ import annotations
 
 __all__ = [
-    "FlowControl",
-    "OrderItem",
     "Node",
     "Execute",
     "Branch",
@@ -14,13 +12,13 @@ __all__ = [
 ]
 
 from typing import Any, overload, Literal
-from collections.abc import Iterable, Iterator
+from collections.abc import Iterable
 
 from . import _objbase
 from . import context as _ctx
 from . import errors as _err
 from . import expr as _expr
-from .scheduler import FlowControl, OrderItem, Coroutine
+from . import scheduler as _sch
 
 
 type Expr = _expr.Expr
@@ -42,7 +40,7 @@ class Node(_objbase.NameMixin, _expr.RefExpr):
     def __init__(self, *, uid: int | None = None) -> None:
         _expr.Expr.__init__(self, uid=uid)
 
-    def activate(self, context: _ctx.Context) -> Coroutine:
+    def activate(self, context: _ctx.Context) -> _sch.Coroutine:
         """Return a task to be submitted to the task queue.
 
         A task item is a dataclass containing the following fields:
@@ -62,11 +60,6 @@ class Node(_objbase.NameMixin, _expr.RefExpr):
             OrderItem: The task item to be submitted to the task queue.
         """
         raise NotImplementedError
-
-    def exit(self) -> None:
-        """Called after any scope that created by this node is exited by
-        another node."""
-        return
 
 
 class _ContextReader:
@@ -227,9 +220,10 @@ class _Recruiter:
         """
         self._downstreams.difference_update(uid)
 
-    def downstream_nodes(self) -> set[Node]:
+    def downstream_activates(self) -> set[_sch.CoroutineFunc]:
         """Return downstream nodes."""
-        return set(_objbase.get_entity(uid, Node) for uid in self._downstreams)
+        return set(_objbase.get_entity(uid, Node).activate
+                   for uid in self._downstreams)
 
     @property
     def downstreams(self) -> set[int]:
@@ -248,13 +242,13 @@ class Execute(_Recruiter, _ContextReader, Node):
         self._source = source
 
     def activate(self, context: _ctx.Context):
-        yield OrderItem(
+        yield _sch.OrderItem(
             self.uid,
             context=context,
             source=self._source,
             args=tuple(self._args),
             kwargs=self._kwargs,
-            recruit=self.downstream_nodes()
+            recruit=self.downstream_activates()
         )
 
 
@@ -282,9 +276,9 @@ class Branch(_ContextReader, Node):
         val, status = self.read_context(context, 0)
 
         if bool(val) and status:
-            yield OrderItem(self.uid, context=context, recruit=self.true.downstream_nodes())
+            yield _sch.OrderItem(self.uid, context=context, recruit=self.true.downstream_activates())
         else:
-            yield OrderItem(self.uid, context=context, recruit=self.false.downstream_nodes())
+            yield _sch.OrderItem(self.uid, context=context, recruit=self.false.downstream_activates())
 
 
 class Repeat(_ContextReader, Node):
@@ -311,16 +305,16 @@ class Repeat(_ContextReader, Node):
         iterable = self.read_context(context, 0)[0]
         for current in iterable:
             context[self.uid] = context.new((current,))
-            yield OrderItem(
+            yield _sch.OrderItem(
                 self.uid,
                 context=context,
-                recruit=self.iter.downstream_nodes(),
-                control=FlowControl.ENTER
+                recruit=self.iter.downstream_activates(),
+                control=_sch.FlowControl.AWAIT
             )
-        yield OrderItem(
+        yield _sch.OrderItem(
             self.uid,
             context=context,
-            recruit=self.stop.downstream_nodes()
+            recruit=self.stop.downstream_activates()
         )
 
     @overload
@@ -347,11 +341,11 @@ class Repeat(_ContextReader, Node):
 class Break(_Recruiter, Node):
     """Break the repeat loop."""
     def activate(self, context: _ctx.Context):
-        yield OrderItem(
+        yield _sch.OrderItem(
             self.uid,
             context=context,
-            recruit=self.downstream_nodes(),
-            control=FlowControl.EXIT
+            recruit=self.downstream_activates(),
+            control=_sch.FlowControl.EXIT
         )
 
 
@@ -366,9 +360,9 @@ class Join(_Recruiter, Node):
     def activate(self, context: _ctx.Context):
         if all(self.flags):
             self.flags = [False] * len(self.receivers)
-            yield OrderItem(self.uid, context=context, recruit=self.downstream_nodes())
+            yield _sch.OrderItem(self.uid, context=context, recruit=self.downstream_activates())
         else:
-            yield OrderItem(self.uid)
+            yield _sch.OrderItem(self.uid)
 
     class Receiver(Node):
         def __init__(self, parent: Join, index: int):
@@ -378,8 +372,8 @@ class Join(_Recruiter, Node):
 
         def activate(self, context: _ctx.Context):
             self.parent.flags[self.index] = True
-            return OrderItem(
+            yield _sch.OrderItem(
                 self.uid,
                 context=context,
-                recruit={self.parent,}
+                recruit={self.parent.activate,}
             )
