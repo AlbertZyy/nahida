@@ -131,24 +131,19 @@ class Executor:
 
 
 class ThreadPoolExecutor(Executor):
-    def __init__(self, max_workers: int | None = None, data_ref: DataRefFactory = SimpleDataRef) -> None:
+    def __init__(self, max_workers: int | None = None) -> None:
         """A thread pool executor.
 
         Args:
             max_workers (int | None, optional): Max number of workers.
-            data_ref (type): A callable returning a DataRef instance with no
-                parameters. DataRef refers to instances that have `get` and
-                `set` methods to load and save data.
-                Defaults to SimpleDataRef that stores values in memory directly.
         """
         from concurrent.futures import ThreadPoolExecutor as _TPE, Future
         self._event_queue: SimpleQueue[ExecEvent] = SimpleQueue()
         self._executor = _TPE(max_workers)
         self._futures: dict[TaskID, Future] = {}
-        self._data_ref_factory = data_ref
 
     @staticmethod
-    def _worker(event_queue: SimpleQueue, task_item: TaskItem, data_ref_factory: DataRefFactory) -> None:
+    def _worker(event_queue: SimpleQueue, task_item: TaskItem) -> None:
         fid = task_item.source
         context = task_item.context
         try:
@@ -167,7 +162,7 @@ class ThreadPoolExecutor(Executor):
             event = ExecEvent(
                 task_id=task_item.uid,
                 status=TaskStatus.SUCCESS,
-                value=data_ref_factory(result)
+                value=context.new(result)
             )
         except Exception as e:
             event = ExecEvent(
@@ -179,7 +174,6 @@ class ThreadPoolExecutor(Executor):
                     traceback.format_exc()# if task_item.error_traceback else ""
                 )
             )
-            print(event)
         event_queue.put(event)
 
     def submit(
@@ -193,7 +187,7 @@ class ThreadPoolExecutor(Executor):
         task_id = TaskID(str(uuid.uuid4()))
         task_item = TaskItem(task_id, source, context, args, kwargs) # TODO: error traceback field
         fut = self._executor.submit(
-            self._worker, self._event_queue, task_item, self._data_ref_factory
+            self._worker, self._event_queue, task_item
         )
         self._futures[task_id] = fut
         return task_id
