@@ -22,17 +22,17 @@ class FlowControl(StrEnum):
     """Workflow control instruction after execution."""
 
     NONE = "none"
-    """**Do nothing and remove this coroutine**"""
+    """**NONE**: *Only one-shot. Do and then remove this coroutine.*"""
 
     AWAIT = "await"
-    """**Wait for all the recruited coroutines to complete**
+    """**AWAIT**: *Wait for all the recruited coroutines to complete.*
 
     Create a new scope for downstreams. Recall this coroutine
     when the new scope exhausts naturely."""
 
     EXIT = "exit"
-    """**Try canceling the most recent upstream coroutine that is awaiting
-    and all its recruitments.**
+    """**EXIT**: *Only one-shot. Try canceling the most recent upstream
+    coroutine that is awaiting and all its recruitments.*
 
     Cancel the current scope."""
 
@@ -51,6 +51,8 @@ class OrderItem:
             submit to an executor.
         args (tuple of Expr, optional): positional arguments for execution.
         kwargs (dict[str, Expr], optional): keyword arguments for execution.
+        recruit (Collection[CoroutineFunc], optional): The coroutine functions
+            to be recruited into the event loop.
         control (FlowControl, optional): Workflow control instruction **after**
             execution. Defaults to `none`.
     """
