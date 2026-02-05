@@ -10,11 +10,10 @@ from typing import Any, NewType
 from collections.abc import Callable
 from enum import StrEnum
 from dataclasses import dataclass, field, asdict
+from concurrent.futures import Future
 import traceback
-from queue import SimpleQueue
-import uuid
 
-from .context import Context, DataRef, SimpleDataRef, DataRefFactory
+from .context import Context, DataRef
 from .expr import Expr
 
 
@@ -93,7 +92,8 @@ class Executor:
         context: Context,
         /,
         args: tuple[Expr, ...] = (),
-        kwargs: dict[str, Expr] = {}
+        kwargs: dict[str, Expr] = {},
+        callback: Callable[[ExecEvent], Any] | None = None
     ) -> TaskID:
         """Submits a task to be executed with the given arguments.
 
@@ -137,13 +137,15 @@ class ThreadPoolExecutor(Executor):
         Args:
             max_workers (int | None, optional): Max number of workers.
         """
-        from concurrent.futures import ThreadPoolExecutor as _TPE, Future
-        self._event_queue: SimpleQueue[ExecEvent] = SimpleQueue()
+        from concurrent.futures import ThreadPoolExecutor as _TPE
         self._executor = _TPE(max_workers)
-        self._futures: dict[TaskID, Future] = {}
+        self._futures: dict[TaskID, tuple[Future[None], Future[ExecEvent]]] = {}
 
     @staticmethod
-    def _worker(event_queue: SimpleQueue, task_item: TaskItem) -> None:
+    def _worker(task_item: TaskItem, event_fut: Future[ExecEvent]) -> None:
+        if event_fut.done():
+            return
+
         fid = task_item.source
         context = task_item.context
         try:
@@ -174,7 +176,8 @@ class ThreadPoolExecutor(Executor):
                     traceback.format_exc()# if task_item.error_traceback else ""
                 )
             )
-        event_queue.put(event)
+        if not event_fut.done():
+            event_fut.set_result(event)
 
     def submit(
         self,
@@ -182,43 +185,34 @@ class ThreadPoolExecutor(Executor):
         context: Context,
         /,
         args: tuple[Expr, ...] = (),
-        kwargs: dict[str, Expr] = {}
+        kwargs: dict[str, Expr] = {},
+        callback: Callable[[ExecEvent], Any] | None = None
     ) -> TaskID:
+        import uuid
+        from concurrent.futures import Future
         task_id = TaskID(str(uuid.uuid4()))
         task_item = TaskItem(task_id, source, context, args, kwargs) # TODO: error traceback field
-        fut = self._executor.submit(
-            self._worker, self._event_queue, task_item
-        )
-        self._futures[task_id] = fut
+        event_fut: Future[ExecEvent] = Future()
+        fut = self._executor.submit(self._worker, task_item, event_fut)
+        if callback is not None:
+            event_fut.add_done_callback(lambda fut: callback(fut.result()))
+        self._futures[task_id] = (fut, event_fut)
         return task_id
 
-    def wait(self) -> ExecEvent:
-        event = self._event_queue.get()
-
-        if event.status in (TaskStatus.SUCCESS, TaskStatus.FAILED, TaskStatus.CANCELLED):
-            if event.task_id is not None:
-                self._futures.pop(event.task_id)
-
-        return event
-
-    def cancel(self, task_id: TaskID, /) -> bool:
+    def cancel(self, task_id: TaskID, /) -> None:
         try:
-            fut = self._futures.pop(task_id)
+            fut, efut = self._futures.pop(task_id)
         except KeyError:
-            return False
+            return
 
-        if fut.cancel():
-            self._event_queue.put(ExecEvent(task_id, TaskStatus.CANCELLED))
-            return True
-        return False
+        fut.cancel()
+
+        if not efut.done():
+            efut.set_result(ExecEvent(task_id, TaskStatus.CANCELLED))
 
     def shutdown(self, wait: bool = True) -> None:
-        self._executor.shutdown(wait=False, cancel_futures=True)
-
-        for task_id in self._futures.keys():
-            self._event_queue.put(ExecEvent(task_id, TaskStatus.CANCELLED))
-
-        self._event_queue.put(ExecEvent(None, TaskStatus.SHUTDOWN))
+        for task_id in tuple(self._futures.keys()):
+            self.cancel(task_id)
 
         if wait:
             self._executor.shutdown(wait=True)
