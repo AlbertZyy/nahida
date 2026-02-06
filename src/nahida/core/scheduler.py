@@ -7,16 +7,16 @@ __all__ = [
     "ConcurrentScheduler"
 ]
 
-from typing import Sequence, Any
-from dataclasses import dataclass, field
 from collections import deque
 from collections.abc import Collection, Callable, Generator
+from dataclasses import dataclass, field
 from enum import StrEnum
 from queue import SimpleQueue
+from typing import Sequence, Any
 
 from .context import Context
-from .expr import Expr
 from .executor import TaskID, Executor, ExecEvent
+from .expr import Expr
 
 
 class FlowControl(StrEnum):

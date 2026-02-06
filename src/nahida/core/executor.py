@@ -6,12 +6,11 @@ __all__ = [
     "ThreadPoolExecutor"
 ]
 
-from typing import Any, NewType
 from collections.abc import Callable
-from enum import StrEnum
-from dataclasses import dataclass, field, asdict
 from concurrent.futures import Future
-import traceback
+from dataclasses import dataclass, field, asdict
+from enum import StrEnum
+from typing import Any, NewType
 
 from .context import Context, DataRef
 from .expr import Expr
@@ -33,7 +32,6 @@ class TaskStatus(StrEnum):
     SUCCESS = "success"
     FAILED = "failed"
     CANCELLED = "cancelled"
-    SHUTDOWN = "shutdown"
 
 
 @dataclass(slots=True, frozen=True)
@@ -61,9 +59,6 @@ class ExecEvent:
 
     def is_cancelled(self) -> bool:
         return self.status == TaskStatus.CANCELLED
-
-    def is_shutdown(self) -> bool:
-        return self.status == TaskStatus.SHUTDOWN
 
 
 class Executor:
@@ -98,31 +93,20 @@ class Executor:
         """Submits a task to be executed with the given arguments.
 
         Args:
-            source (int | str): Unique ID of callable registered or source code.
+            source (int | str): Unique ID of registered callable or source code.
             context (Context): Necessary memories for expressions to evaluate.
             args (tuple of Expr): Expressions for positional arguments.
             kwargs (dict[str, Expr]): Expressions for keyword arguments.
+            callback ((ExecEvent) -> Any, optional): A function called when
+                the task done.
 
         Returns:
-            int: UID of the created work.
-        """
-        raise NotImplementedError
-
-    def wait(self) -> ExecEvent:
-        """Wait for the next work event.
-
-        Returns:
-            ExecEvent: an dataclass containing
-            - task_id (int | None): The work ID returned by `submit`.
-            - status (TaskStatus): success, failed, cancelled or shutdown.
-            - value (DataRef | None): Data reference of the returned result.
-                Ready for being put back into a context, or directly get the value.
-            - error_info (ErrorInfo | None): Error information.
+            int: ID of the created task.
         """
         raise NotImplementedError
 
     def cancel(self, task_id: TaskID, /) -> bool:
-        """Cancels the work with the given task_id."""
+        """Cancels the task with the given ID."""
         raise NotImplementedError
 
     def shutdown(self, wait: bool = True) -> None:
@@ -167,13 +151,14 @@ class ThreadPoolExecutor(Executor):
                 value=context.new(result)
             )
         except Exception as e:
+            import traceback
             event = ExecEvent(
                 task_id=task_item.uid,
                 status=TaskStatus.FAILED,
                 error_info=ErrorInfo(
                     e.__class__.__name__,
                     str(e.args[0]) if len(e.args) == 1 else repr(e.args),
-                    traceback.format_exc()# if task_item.error_traceback else ""
+                    traceback.format_exc() if task_item.error_traceback else ""
                 )
             )
         if not event_fut.done():
