@@ -7,15 +7,16 @@ __all__ = [
     "ConcurrentScheduler"
 ]
 
-from typing import Sequence, Any
-from dataclasses import dataclass, field
 from collections import deque
 from collections.abc import Collection, Callable, Generator
+from dataclasses import dataclass, field
 from enum import StrEnum
+from queue import SimpleQueue
+from typing import Sequence, Any
 
 from .context import Context
+from .executor import TaskID, Executor, ExecEvent
 from .expr import Expr
-from .executor import TaskID, Executor
 
 
 class FlowControl(StrEnum):
@@ -153,6 +154,7 @@ class ConcurrentScheduler(Scheduler):
         # TODO: add checking for circular dependencies!
         scope_manager = ScopeManager(len(starters))
         ready_nodes: deque[tuple[Coroutine, int]] = deque()
+        event_queue: SimpleQueue[ExecEvent] = SimpleQueue()
 
         for n in starters:
             ready_nodes.append((n(context), 0))
@@ -177,16 +179,17 @@ class ConcurrentScheduler(Scheduler):
                 for expr in chain(order_item.args, order_item.kwargs.values()):
                     uid_set |= expr.refs()
 
-                wid = executor.submit(
+                tid = executor.submit(
                     order_item.source, order_item.context.view(uid_set),
-                    order_item.args, order_item.kwargs
+                    order_item.args, order_item.kwargs,
+                    callback=lambda event: event_queue.put(event)
                 )
-                inflight[wid] = (coro, scope_id, order_item)
+                inflight[tid] = (coro, scope_id, order_item)
 
             if len(inflight) == 0:
                 break
 
-            event = executor.wait()
+            event = event_queue.get()
 
             if event.task_id is None: # executor-level events
                 if event.is_shutdown():

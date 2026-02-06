@@ -5,18 +5,18 @@ __all__ = [
     "GraphThread"
 ]
 
-from threading import Thread
-from queue import Queue
-from typing import Any
 from collections.abc import Sequence, Callable
+from queue import Queue
+from threading import Thread
+from typing import Any
 
 from . import _objbase as _ob
-from . import expr as _expr
 from . import errors as _err
+from . import expr as _expr
 from . import node as _node
-from .context import Context, SimpleDataRef, DataRefFactory
-from .scheduler import Scheduler
+from .context import Context
 from .executor import Executor
+from .scheduler import Scheduler
 
 Expr = _expr.Expr
 
@@ -119,15 +119,12 @@ class Graph(_ob.NameMixin, _ob.UIDMixin):
     def lambdify(
         self,
         *,
-        data_ref: DataRefFactory = SimpleDataRef,
         scheduler: Scheduler | None = None,
         executor: Executor | None = None
     ):
         """Transform the graph to a lambda function.
 
         Args:
-            data_ref (DataRefFactory): The data reference class.
-                Defaults to `SimpleDataRef`.
             scheduler (Scheduler, optional): The scheduler defining the
                 execution flow.
                 Defaults to `None`, using the global default.
@@ -149,7 +146,7 @@ class Graph(_ob.NameMixin, _ob.UIDMixin):
                 initial: dict[int | str, Any] = {}
                 initial.update(enumerate(args))
                 initial.update(kwargs)
-                context[self.uid] = data_ref(initial)
+                context[self.uid] = context.new(initial)
 
             context = scheduler.forward(
                 context,

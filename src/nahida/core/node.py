@@ -11,8 +11,8 @@ __all__ = [
     "Join"
 ]
 
-from typing import Any, overload, Literal
 from collections.abc import Iterable
+from typing import Any, overload, Literal
 
 from . import _objbase
 from . import context as _ctx

@@ -2,8 +2,8 @@ from __future__ import annotations
 
 __all__ = ["DataRef", "SimpleDataRef", "Context"]
 
-from typing import Any, Protocol, Self
 from collections.abc import Callable
+from typing import Any, Protocol, Self
 
 
 empty = object()
