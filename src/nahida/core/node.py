@@ -12,7 +12,7 @@ __all__ = [
     "Group"
 ]
 
-from collections.abc import Callable, Collection, Iterable
+from collections.abc import Callable, Iterable
 from typing import Any, overload, Literal
 
 from . import _objbase
@@ -384,7 +384,8 @@ class Group(_Recruiter, _ContextReader, Node):
     """Schedule a group of nodes with a sub-context."""
     def __init__(
         self,
-        entries: Collection[_sch.CoroutineFunc],
+        guid: int,
+        entries: set[_sch.CoroutineFunc],
         extractor: Callable[[_ctx.Context], Any],
         *,
         uid: int | None = None
@@ -392,6 +393,7 @@ class Group(_Recruiter, _ContextReader, Node):
         Node.__init__(self, uid=uid)
         _ContextReader.__init__(self)
         _Recruiter.__init__(self)
+        self._guid = guid
         self._entries = entries
         self._extractor = extractor
 
@@ -403,7 +405,7 @@ class Group(_Recruiter, _ContextReader, Node):
             initial: dict[int | str, Any] = {}
             initial.update(enumerate(args))
             initial.update(kwargs)
-            sub_context[self.uid] = sub_context.new(initial)
+            sub_context[self._guid] = sub_context.new(initial)
 
         yield _sch.OrderItem(
             self.uid,
