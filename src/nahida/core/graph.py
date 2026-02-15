@@ -157,6 +157,15 @@ class Graph(_ob.NameMixin, _ob.UIDMixin):
 
         return runner
 
+    def group(self, *, uid: int | None = None) -> _node.Group:
+        """Create a new Group node wrapping this graph."""
+        return _node.Group(
+            guid=self.uid,
+            entries=set(s.activate for s in self._starters),
+            extractor=self._construct_output,
+            uid=uid
+        )
+
     @property
     def input(self):
         return _expr.VariableExpr(self.uid)

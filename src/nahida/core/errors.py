@@ -12,11 +12,12 @@ __all__ = [
 ]
 
 from typing import Any
+from ._objbase import get_entity, has_entity
 
 
 def _make_node_name(node: Any) -> str:
-    if hasattr(node, "__name__"):
-        return str(node.__name__)
+    if has_entity(node):
+        return str(get_entity(node))
     else:
         return repr(node)
 

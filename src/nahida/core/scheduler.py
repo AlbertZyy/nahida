@@ -192,8 +192,7 @@ class ConcurrentScheduler(Scheduler):
             event = event_queue.get()
 
             if event.task_id is None: # executor-level events
-                if event.is_shutdown():
-                    break
+                break
             else:
                 coro, scope_id, order_item = inflight.pop(event.task_id)
                 if event.is_success():

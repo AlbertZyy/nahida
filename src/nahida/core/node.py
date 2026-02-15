@@ -8,10 +8,11 @@ __all__ = [
     "Branch",
     "Repeat",
     "Break",
-    "Join"
+    "Join",
+    "Group"
 ]
 
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from typing import Any, overload, Literal
 
 from . import _objbase
@@ -377,3 +378,48 @@ class Join(_Recruiter, Node):
                 context=context,
                 recruit={self.parent.activate,}
             )
+
+
+class Group(_Recruiter, _ContextReader, Node):
+    """Schedule a group of nodes with a sub-context."""
+    def __init__(
+        self,
+        guid: int,
+        entries: set[_sch.CoroutineFunc],
+        extractor: Callable[[_ctx.Context], Any],
+        *,
+        uid: int | None = None
+    ) -> None:
+        Node.__init__(self, uid=uid)
+        _ContextReader.__init__(self)
+        _Recruiter.__init__(self)
+        self._guid = guid
+        self._entries = entries
+        self._extractor = extractor
+
+    def activate(self, context: _ctx.Context) -> _sch.Generator[_sch.OrderItem, Any, Any]:
+        args, kwargs = self.read_context_all_subscriptions(context)
+        sub_context = _ctx.Context()
+
+        if args or kwargs:
+            initial: dict[int | str, Any] = {}
+            initial.update(enumerate(args))
+            initial.update(kwargs)
+            sub_context[self._guid] = sub_context.new(initial)
+
+        yield _sch.OrderItem(
+            self.uid,
+            context=sub_context,
+            recruit=self._entries,
+            control=_sch.FlowControl.AWAIT
+        )
+
+        result = self._extractor(sub_context)
+        context[self.uid] = context.new(result)
+
+        yield _sch.OrderItem(
+            self.uid,
+            context=context,
+            recruit=self.downstream_activates()
+        )
+
