@@ -75,6 +75,10 @@ class _ContextReader:
         self._args = []
         self._kwargs = {}
 
+    def __call__(self, *args: Expr | Any, **kwargs: Expr | Any):
+        self.subs(*args, **kwargs)
+        return self
+
     def subs(self, *args: Expr | Any, **kwargs: Expr | Any) -> None:
         """Set subscriptions for attributes.
 
@@ -188,6 +192,13 @@ class _Recruiter:
             self._downstreams = set()
         else:
             self._downstreams = set(downstream)
+
+    def __rshift__(self, other: Node, /):
+        from ..chained import NodeChain
+        if isinstance(other, Node):
+            self.link(other)
+            return NodeChain(self, other)
+        return NotImplemented
 
     def link(self, *other: Node) -> None:
         """Add downstream nodes to be recruited after execution.
@@ -325,7 +336,7 @@ class Repeat(_ContextReader, Node):
     @classmethod
     def from_range(cls, start: int | Expr, stop: int | Expr, step: int | Expr = 1, /, *, uid: Any = None) -> Repeat: ...
     @classmethod
-    def from_range(cls, *args, uid: Any = None) -> Repeat:
+    def from_range(cls, *args: int | Expr, uid: Any = None) -> Repeat:
         if len(args) == 0:
             start, stop, step = 0, 1, 1
         elif len(args) == 1:
@@ -336,7 +347,12 @@ class Repeat(_ContextReader, Node):
             start, stop, step = args
         else:
             raise TypeError("Invalid arguments")
-        return cls(range(start, stop, step), uid=uid)
+        return cls(_expr.FormulaExpr(
+            "range(start, stop, step)",
+            start=_expr.ensure_expr(start),
+            stop=_expr.ensure_expr(stop),
+            step=_expr.ensure_expr(step)
+        ), uid=uid)
 
 
 class Break(_Recruiter, Node):

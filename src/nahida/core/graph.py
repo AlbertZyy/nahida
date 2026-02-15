@@ -23,6 +23,7 @@ Expr = _expr.Expr
 
 class Graph(_ob.NameMixin, _ob.UIDMixin):
     """General computational node graph."""
+    GRAPH_INPUT_ID = 0
     def __init__(
         self,
         starters: Sequence[_node.Node],
@@ -146,7 +147,7 @@ class Graph(_ob.NameMixin, _ob.UIDMixin):
                 initial: dict[int | str, Any] = {}
                 initial.update(enumerate(args))
                 initial.update(kwargs)
-                context[self.uid] = context.new(initial)
+                context[self.GRAPH_INPUT_ID] = context.new(initial)
 
             context = scheduler.forward(
                 context,
@@ -160,7 +161,7 @@ class Graph(_ob.NameMixin, _ob.UIDMixin):
     def group(self, *, uid: int | None = None) -> _node.Group:
         """Create a new Group node wrapping this graph."""
         return _node.Group(
-            guid=self.uid,
+            guid=self.GRAPH_INPUT_ID,
             entries=set(s.activate for s in self._starters),
             extractor=self._construct_output,
             uid=uid
@@ -168,7 +169,7 @@ class Graph(_ob.NameMixin, _ob.UIDMixin):
 
     @property
     def input(self):
-        return _expr.VariableExpr(self.uid)
+        return _expr.VariableExpr(self.GRAPH_INPUT_ID)
 
 
 class GraphThread(Thread):

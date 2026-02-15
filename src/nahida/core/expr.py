@@ -9,7 +9,7 @@ from ._objbase import UIDMixin
 from .context import Context
 
 
-def _to_expr(obj: Any, /) -> Expr:
+def ensure_expr(obj: Any, /) -> Expr:
     if isinstance(obj, Expr):
         return obj
     return ConstExpr(obj)
@@ -29,17 +29,14 @@ class Expr(UIDMixin):
         """Return the UIDs of all RefExprs that this expression depends on."""
         return set()
 
-    def __call__(self, context: Context, /) -> Any:
-        return self.eval(context)
-
     def __getitem__(self, index: int | str, /) -> GetItemExpr:
         return GetItemExpr(self, index)
 
     def __or__(self, other: Any, /) -> UnionExpr:
-        return UnionExpr(self, _to_expr(other))
+        return UnionExpr(self, ensure_expr(other))
 
     def __ror__(self, other: Any, /) -> UnionExpr:
-        return UnionExpr(_to_expr(other), self)
+        return UnionExpr(ensure_expr(other), self)
 
 
 def is_expr(obj: Any, /) -> TypeGuard[Expr]:
@@ -69,7 +66,7 @@ class VariableGetItemExpr(Expr):
     def __init__(self, target_uid: int, index: Any, /) -> None:
         super().__init__()
         self._target_uid = target_uid
-        self._index = _to_expr(index)
+        self._index = ensure_expr(index)
 
     def eval(self, context: Context, /) -> Any:
         try:
@@ -120,7 +117,7 @@ class GetItemExpr(Expr):
     def __init__(self, expr: Expr, index: int | str | Expr, /) -> None:
         super().__init__()
         self._expr = expr
-        self._index = _to_expr(index)
+        self._index = ensure_expr(index)
 
     def eval(self, context: Context, /) -> Any:
         val = self._expr.eval(context)
