@@ -8,7 +8,7 @@ from nahida.core.expr import FormulaExpr
 # 1. 单步幂迭代执行节点
 # ------------------------------
 
-@nh.nodal
+@nh.nfunc
 def power_step(A, x):
     """
     单步幂迭代：
@@ -25,7 +25,7 @@ def power_step(A, x):
 
 power_step.set_name("power_step")
 
-@nh.nodal
+@nh.nfunc
 def compute_delta(lam, lam_prev):
     return abs(lam - lam_prev)
 

@@ -67,12 +67,13 @@ class Executor:
     @classmethod
     def register(cls, target: Callable[..., Any], *, fid: int | None = None) -> int:
         if fid is None:
-            if hasattr(target, "__name__"):
-                fid = hash(target.__name__)
-                while fid in cls._callable_registry:
-                    fid += 1
-            else:
+            if not hasattr(target, "__name__"):
                 raise ValueError()
+            fid = hash(target.__name__)
+            while fid in cls._callable_registry:
+                if cls._callable_registry[fid] is target:
+                    return fid
+                fid += 1
 
         elif fid in cls._callable_registry:
             raise KeyError(f"id {fid} already exist")

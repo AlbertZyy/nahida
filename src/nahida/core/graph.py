@@ -40,22 +40,21 @@ class Graph(_ob.NameMixin, _ob.UIDMixin):
         self._starters = starters
         self._expose: Expr | tuple[Expr, ...] | dict[str, Expr] | None = None
 
-        if exposes is None:
-            return
-        elif isinstance(exposes, Expr):
-            self._expose = exposes
-        elif isinstance(exposes, tuple):
-            self._expose = tuple(map(self._validate_port, exposes))
-        elif isinstance(exposes, dict):
-            self._expose = {
-                key: self._validate_port(value)
-                for key, value in exposes.items()
-            }
-        else:
-            raise TypeError(
-                "expected expressions, tuple, dict, or None, "
-                f"got {type(exposes).__name__!r}."
-            )
+        if exposes is not None:
+            if isinstance(exposes, Expr):
+                self._expose = exposes
+            elif isinstance(exposes, tuple):
+                self._expose = tuple(map(self._validate_port, exposes))
+            elif isinstance(exposes, dict):
+                self._expose = {
+                    key: self._validate_port(value)
+                    for key, value in exposes.items()
+                }
+            else:
+                raise TypeError(
+                    "expected expressions, tuple, dict, or None, "
+                    f"got {type(exposes).__name__!r}."
+                )
 
         self._construct_output = self._build_exposer(exposes)
 

@@ -5,7 +5,7 @@ __all__ = [
     "formula",
     "gin",
     "graph",
-    "nodal",
+    "nfunc",
     "repeat"
 ]
 
@@ -133,8 +133,8 @@ def graph(
     return Graph(starters, exposes=outputs)
 
 
-def nodal(func: Callable[..., Any], /):
-    """A decorator that transform a function into an execution node."""
+def nfunc(func: Callable[..., Any], /):
+    """*Node* - A decorator that transform a Python function into an execution node."""
     from .core.executor import Executor
     from .core.node import Execute
 

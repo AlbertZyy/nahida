@@ -3,7 +3,7 @@ import numpy as np
 import nahida as nh
 
 
-@nh.nodal
+@nh.nfunc
 def power_step(A, x):
     """
     单步幂迭代：
@@ -19,21 +19,21 @@ def power_step(A, x):
     return x_next, lam
 
 
-@nh.nodal
+@nh.nfunc
 def compute_delta(lam, lam_prev):
     return abs(lam - lam_prev)
 
 
 step_group = nh.graph(
-    power_step(A=nh.gin["A"], x=nh.gin["x"]) \
-    >> compute_delta(lam=power_step[1], lam_prev=nh.gin["lambda_prev"]),
+    power_step >> compute_delta,
     {
         "x_next": power_step[0],
         "lambda": power_step[1],
         "delta": compute_delta
     }
 ).group()
-
+power_step.subs(A=nh.gin["A"], x=nh.gin["x"])
+compute_delta.subs(lam=power_step[1], lam_prev=nh.gin["lambda_prev"])
 
 g_main = nh.graph(
     nh.repeat(

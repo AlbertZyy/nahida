@@ -75,10 +75,6 @@ class _ContextReader:
         self._args = []
         self._kwargs = {}
 
-    def __call__(self, *args: Expr | Any, **kwargs: Expr | Any):
-        self.subs(*args, **kwargs)
-        return self
-
     def subs(self, *args: Expr | Any, **kwargs: Expr | Any) -> None:
         """Set subscriptions for attributes.
 
