@@ -23,6 +23,7 @@ Expr = _expr.Expr
 
 class Graph(_ob.NameMixin, _ob.UIDMixin):
     """General computational node graph."""
+    GRAPH_INPUT_ID = 0
     def __init__(
         self,
         starters: Sequence[_node.Node],
@@ -39,22 +40,21 @@ class Graph(_ob.NameMixin, _ob.UIDMixin):
         self._starters = starters
         self._expose: Expr | tuple[Expr, ...] | dict[str, Expr] | None = None
 
-        if exposes is None:
-            return
-        elif isinstance(exposes, Expr):
-            self._expose = exposes
-        elif isinstance(exposes, tuple):
-            self._expose = tuple(map(self._validate_port, exposes))
-        elif isinstance(exposes, dict):
-            self._expose = {
-                key: self._validate_port(value)
-                for key, value in exposes.items()
-            }
-        else:
-            raise TypeError(
-                "expected expressions, tuple, dict, or None, "
-                f"got {type(exposes).__name__!r}."
-            )
+        if exposes is not None:
+            if isinstance(exposes, Expr):
+                self._expose = exposes
+            elif isinstance(exposes, tuple):
+                self._expose = tuple(map(self._validate_port, exposes))
+            elif isinstance(exposes, dict):
+                self._expose = {
+                    key: self._validate_port(value)
+                    for key, value in exposes.items()
+                }
+            else:
+                raise TypeError(
+                    "expected expressions, tuple, dict, or None, "
+                    f"got {type(exposes).__name__!r}."
+                )
 
         self._construct_output = self._build_exposer(exposes)
 
@@ -146,7 +146,7 @@ class Graph(_ob.NameMixin, _ob.UIDMixin):
                 initial: dict[int | str, Any] = {}
                 initial.update(enumerate(args))
                 initial.update(kwargs)
-                context[self.uid] = context.new(initial)
+                context[self.GRAPH_INPUT_ID] = context.new(initial)
 
             context = scheduler.forward(
                 context,
@@ -160,7 +160,7 @@ class Graph(_ob.NameMixin, _ob.UIDMixin):
     def group(self, *, uid: int | None = None) -> _node.Group:
         """Create a new Group node wrapping this graph."""
         return _node.Group(
-            guid=self.uid,
+            guid=self.GRAPH_INPUT_ID,
             entries=set(s.activate for s in self._starters),
             extractor=self._construct_output,
             uid=uid
@@ -168,7 +168,7 @@ class Graph(_ob.NameMixin, _ob.UIDMixin):
 
     @property
     def input(self):
-        return _expr.VariableExpr(self.uid)
+        return _expr.VariableExpr(self.GRAPH_INPUT_ID)
 
 
 class GraphThread(Thread):
